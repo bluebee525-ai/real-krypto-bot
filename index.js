@@ -11,18 +11,17 @@ const USER_ID               = process.env.USER_ID;              // Your Discord 
 const LTC_BLOCKCYPHER_TOKEN = process.env.LTC_BLOCKCYPHER_TOKEN || ''; // optional
 
 // Hardcode your wallet addresses here (easiest way - survives redeploy)
-const LTC_ADDRESSES = [Lf8FD7Muy4e84EGWBLtdtYBMbm7BYdQQP5
-  // 'Lxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-  // 'Mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-  // Add as many as you want
+// Hardcode your wallet addresses here (use quotes!)
+const LTC_ADDRESSES = [
+  "Lf8FD7Muy4e84EGWBLtdtYBMbm7BYdQQP5",     // your LTC address
+  // "another-ltc-address-here-if-you-have-more",
 ];
 
+// Solana addresses (also strings)
 const SOL_ADDRESSES = [
-  // 'SoLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-  // 'AnotherSolAddressHerexxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-  // Add your Solana addresses
+  "YourSolanaAddressHere111111111111111111111111111",   // example
+  // "AnotherSolAddressxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 ];
-
 // If you want to start empty and add via command only → leave arrays empty
 // const LTC_ADDRESSES = [];
 // const SOL_ADDRESSES = [];
