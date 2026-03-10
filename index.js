@@ -11,7 +11,7 @@ const USER_ID               = process.env.USER_ID;              // Your Discord 
 const LTC_BLOCKCYPHER_TOKEN = process.env.LTC_BLOCKCYPHER_TOKEN || ''; // optional
 
 // Hardcode your wallet addresses here (easiest way - survives redeploy)
-const LTC_ADDRESSES = [  Lf8FD7Muy4e84EGWBLtdtYBMbm7BYdQQP5
+const LTC_ADDRESSES = [Lf8FD7Muy4e84EGWBLtdtYBMbm7BYdQQP5
   // 'Lxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
   // 'Mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
   // Add as many as you want
