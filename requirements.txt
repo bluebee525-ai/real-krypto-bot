@@ -1,0 +1,4 @@
+discord.py==2.3.2
+aiohttp==3.9.5
+qrcode[pil]==7.4.2
+Pillow==10.3.0
