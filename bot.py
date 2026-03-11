@@ -19,6 +19,7 @@ NOTIFY_USER_ID = int(os.environ.get("NOTIFY_USER_ID", "0"))
 WATCH_ADDRESS  = os.environ.get("LTC_WATCH_ADDRESS", "")
 POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "30"))
 REQUIRED_CONFS = int(os.environ.get("REQUIRED_CONFS", "6"))
+GUILD_ID       = int(os.environ.get("GUILD_ID", "0"))  # Your server ID for instant command registration
 
 SOCHAIN  = "https://sochain.com/api/v3"
 LTC_ICON = "https://cryptologos.cc/logos/litecoin-ltc-logo.png"
@@ -278,47 +279,55 @@ async def poll_loop():
 @bot.listen(hikari.StartingEvent)
 async def on_starting(event: hikari.StartingEvent) -> None:
     app = await bot.rest.fetch_application()
-    await bot.rest.set_application_commands(
-        application=app.id,
-        commands=[
-            bot.rest.slash_command_builder("checktx", "Look up a Litecoin transaction by TXID")
-                .add_option(hikari.CommandOption(
-                    type=hikari.OptionType.STRING, name="txid",
-                    description="64-character hex transaction ID", is_required=True)),
 
-            bot.rest.slash_command_builder("watch", "Watch a Litecoin address for new incoming transactions")
-                .add_option(hikari.CommandOption(
-                    type=hikari.OptionType.STRING, name="address",
-                    description="LTC address (starts with L, M or ltc1)", is_required=True)),
+    commands = [
+        bot.rest.slash_command_builder("checktx", "Look up a Litecoin transaction by TXID")
+            .add_option(hikari.CommandOption(
+                type=hikari.OptionType.STRING, name="txid",
+                description="64-character hex transaction ID", is_required=True)),
 
-            bot.rest.slash_command_builder("unwatch", "Stop watching a Litecoin address")
-                .add_option(hikari.CommandOption(
-                    type=hikari.OptionType.STRING, name="address",
-                    description="LTC address to stop monitoring", is_required=True)),
+        bot.rest.slash_command_builder("watch", "Watch a Litecoin address for new incoming transactions")
+            .add_option(hikari.CommandOption(
+                type=hikari.OptionType.STRING, name="address",
+                description="LTC address (starts with L, M or ltc1)", is_required=True)),
 
-            bot.rest.slash_command_builder("watchlist", "Show all watched addresses and transactions"),
+        bot.rest.slash_command_builder("unwatch", "Stop watching a Litecoin address")
+            .add_option(hikari.CommandOption(
+                type=hikari.OptionType.STRING, name="address",
+                description="LTC address to stop monitoring", is_required=True)),
 
-            bot.rest.slash_command_builder("invoice", "Create a Litecoin payment invoice with QR code")
-                .add_option(hikari.CommandOption(
-                    type=hikari.OptionType.STRING, name="address",
-                    description="Your LTC receiving address", is_required=True))
-                .add_option(hikari.CommandOption(
-                    type=hikari.OptionType.NUMBER, name="amount",
-                    description="Amount in LTC", is_required=True))
-                .add_option(hikari.CommandOption(
-                    type=hikari.OptionType.STRING, name="description",
-                    description="What the payment is for", is_required=False)),
+        bot.rest.slash_command_builder("watchlist", "Show all watched addresses and transactions"),
 
-            bot.rest.slash_command_builder("invoicestatus", "Check the status of an invoice")
-                .add_option(hikari.CommandOption(
-                    type=hikari.OptionType.STRING, name="invoice_id",
-                    description="Invoice ID e.g. 0001", is_required=True)),
+        bot.rest.slash_command_builder("invoice", "Create a Litecoin payment invoice with QR code")
+            .add_option(hikari.CommandOption(
+                type=hikari.OptionType.STRING, name="address",
+                description="Your LTC receiving address", is_required=True))
+            .add_option(hikari.CommandOption(
+                type=hikari.OptionType.NUMBER, name="amount",
+                description="Amount in LTC", is_required=True))
+            .add_option(hikari.CommandOption(
+                type=hikari.OptionType.STRING, name="description",
+                description="What the payment is for", is_required=False)),
 
-            bot.rest.slash_command_builder("ltcstats", "Show live Litecoin network stats"),
-            bot.rest.slash_command_builder("help", "Show all bot commands"),
-        ],
-    )
-    print("✅ Slash commands registered")
+        bot.rest.slash_command_builder("invoicestatus", "Check the status of an invoice")
+            .add_option(hikari.CommandOption(
+                type=hikari.OptionType.STRING, name="invoice_id",
+                description="Invoice ID e.g. 0001", is_required=True)),
+
+        bot.rest.slash_command_builder("ltcstats", "Show live Litecoin network stats"),
+        bot.rest.slash_command_builder("help", "Show all bot commands"),
+    ]
+
+    if GUILD_ID:
+        # Guild-specific = instant (use this for testing)
+        await bot.rest.set_application_commands(
+            application=app.id, guild=GUILD_ID, commands=commands)
+        print(f"✅ Slash commands registered to guild {GUILD_ID} (instant)")
+    else:
+        # Global = up to 1 hour propagation
+        await bot.rest.set_application_commands(
+            application=app.id, commands=commands)
+        print("✅ Slash commands registered globally (may take up to 1hr to appear)")
 
 # ──────────────────────────────────────────────────────────────
 # INTERACTION HANDLER
