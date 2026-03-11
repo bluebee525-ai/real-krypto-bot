@@ -456,7 +456,7 @@ async def on_starting(event: hikari.StartingEvent) -> None:
         # ── Invoices ──────────────────────────────────────────
         bot.rest.slash_command_builder("invoice", "Create a Litecoin payment invoice with QR code")
             .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="address",
-                description="Your LTC receiving address", is_required=True))
+                description="Your LTC receiving address (auto-fills from watched wallets if empty)", is_required=False))
             .add_option(hikari.CommandOption(type=hikari.OptionType.FLOAT, name="amount",
                 description="Amount to request", is_required=True))
             .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="currency",
@@ -667,15 +667,42 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
     elif cmd == "balance":
         address = str(opt(ix, "address") or "").strip()
         await ix.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
-        stats = await fetch_address_stats(address)
+        if not address:
+            await ix.edit_initial_response(embed=hikari.Embed(
+                title="❌ No Address", description="Please provide an LTC address.", color=C_RED))
+            return
+        print(f"[Balance] Fetching {address}...")
+        raw = await api_get(f"{BLOCKCHAIR}/dashboards/address/{address}")
+        print(f"[Balance] Raw response keys: {list(raw.keys()) if raw else 'None'}")
+        if not raw or not raw.get("data"):
+            await ix.edit_initial_response(embed=hikari.Embed(
+                title="❌ Not Found",
+                description=f"Could not fetch data for:
+`{address}`
+
+Check it's a valid LTC address.",
+                color=C_RED))
+            return
+        data    = raw["data"]
+        entry   = data.get(address) or next(iter(data.values()), None)
+        if not entry:
+            await ix.edit_initial_response(embed=hikari.Embed(
+                title="❌ No Data", description=f"Blockchair returned no data for `{address}`", color=C_RED))
+            return
+        addr    = entry.get("address", {})
+        balance  = addr.get("balance", 0) / 1e8
+        received = addr.get("received", 0) / 1e8
+        spent    = addr.get("spent", 0) / 1e8
+        tx_count = addr.get("transaction_count", 0)
+        print(f"[Balance] {address}: {balance} LTC, {tx_count} TXs")
         embed = (
             hikari.Embed(title="💼 Address Balance", color=C_LTC, timestamp=datetime.now(timezone.utc))
             .set_author(name="Litecoin Balance", icon=LTC_ICON)
-            .add_field("📬 Address",        f"```{address}```",          inline=False)
-            .add_field("💰 Balance",        fmt_dual(stats["balance"]),  inline=True)
-            .add_field("📥 Total Received", fmt_dual(stats["received"]), inline=True)
-            .add_field("📤 Total Sent",     fmt_dual(stats["spent"]),    inline=True)
-            .add_field("🔢 Transactions",   f"`{stats['tx_count']}`",    inline=True)
+            .add_field("📬 Address",        f"```{address}```",   inline=False)
+            .add_field("💰 Balance",        fmt_dual(balance),    inline=True)
+            .add_field("📥 Total Received", fmt_dual(received),   inline=True)
+            .add_field("📤 Total Sent",     fmt_dual(spent),      inline=True)
+            .add_field("🔢 Transactions",   f"`{tx_count}`",      inline=True)
             .set_footer(text=price_footer())
         )
         await ix.edit_initial_response(embed=embed)
@@ -764,6 +791,26 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
         amount      = float(opt(ix, "amount") or 0)
         currency    = str(opt(ix, "currency") or "ltc").lower()
         description = str(opt(ix, "description") or "Litecoin Payment")
+
+        # Auto-fill address from watched wallets / portfolio if empty
+        if not address:
+            if WATCH_ADDRESS:
+                address = WATCH_ADDRESS
+                print(f"[Invoice] Auto-filled address from WATCH_ADDRESS: {address}")
+            elif watched_addresses:
+                address = next(iter(watched_addresses))
+                print(f"[Invoice] Auto-filled address from watched_addresses: {address}")
+            elif portfolio:
+                address = next(iter(portfolio.values()))
+                print(f"[Invoice] Auto-filled address from portfolio: {address}")
+            else:
+                await ix.edit_initial_response(embed=hikari.Embed(
+                    title="❌ No Address",
+                    description="No address provided and no watched wallets to auto-fill from.
+Provide an address or use `/watch` first.",
+                    color=C_RED))
+                return
+
         if amount <= 0:
             await ix.edit_initial_response("❌ Amount must be greater than 0.")
             return
