@@ -21,8 +21,8 @@ POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "30"))
 REQUIRED_CONFS = int(os.environ.get("REQUIRED_CONFS", "6"))
 GUILD_ID       = int(os.environ.get("GUILD_ID", "0"))  # Your server ID for instant command registration
 
-SOCHAIN  = "https://sochain.com/api/v3"
-LTC_ICON = "https://cryptologos.cc/logos/litecoin-ltc-logo.png"
+BLOCKCHAIR = "https://api.blockchair.com/litecoin"
+LTC_ICON   = "https://cryptologos.cc/logos/litecoin-ltc-logo.png"
 C_LTC    = 0x345D9D
 C_GREEN  = 0x2ECC71
 C_RED    = 0xE74C3C
@@ -50,48 +50,64 @@ invoices:          dict = {}
 invoice_seq              = 0
 
 # ──────────────────────────────────────────────────────────────
-# SOCHAIN API
+# BLOCKCHAIR API
 # ──────────────────────────────────────────────────────────────
 async def api_get(url: str) -> dict | None:
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
                 if r.status == 200:
-                    body = await r.json()
-                    return body.get("data", body)
+                    return await r.json()
+                print(f"[API] HTTP {r.status} for {url}")
     except Exception as e:
         print(f"[API] {e}")
     return None
 
 async def fetch_tx(txid: str) -> dict | None:
-    raw = await api_get(f"{SOCHAIN}/transaction/LTC/{txid}")
+    raw = await api_get(f"{BLOCKCHAIR}/dashboards/transaction/{txid}")
     if not raw:
         return None
-    outputs = [
-        {"addresses": [o["address"]] if o.get("address") else [], "value_ltc": float(o.get("value", 0))}
-        for o in raw.get("outputs", [])
-    ]
+    tx_data = raw.get("data", {}).get(txid, {})
+    tx      = tx_data.get("transaction", {})
+    inputs  = tx_data.get("inputs", [])
+    outputs = tx_data.get("outputs", [])
+
+    in_addrs  = [{"addresses": [i["recipient"]] if i.get("recipient") else []} for i in inputs]
+    out_addrs = [{"addresses": [o["recipient"]] if o.get("recipient") else [],
+                  "value_ltc": o.get("value", 0) / 1e8} for o in outputs]
+
+    confs = tx.get("block_id", -1)
+    if confs == -1:
+        confs = 0  # unconfirmed
+    else:
+        ctx = raw.get("context", {})
+        tip = ctx.get("state", confs)
+        confs = max(0, tip - confs + 1)
+
     return {
-        "hash":          raw.get("hash", txid),
-        "confirmations": int(raw.get("confirmations", 0)),
-        "total_ltc":     sum(o["value_ltc"] for o in outputs),
-        "fee_ltc":       float(raw.get("fee", 0)),
-        "size":          raw.get("size", 0),
-        "time":          raw.get("time", ""),
-        "inputs":        [{"addresses": [i["address"]] if i.get("address") else []} for i in raw.get("inputs", [])],
-        "outputs":       outputs,
+        "hash":          txid,
+        "confirmations": confs,
+        "total_ltc":     tx.get("output_total", 0) / 1e8,
+        "fee_ltc":       tx.get("fee", 0) / 1e8,
+        "size":          tx.get("size", 0),
+        "time":          tx.get("time", ""),
+        "inputs":        in_addrs,
+        "outputs":       out_addrs,
     }
 
 async def fetch_latest_tx_hash(address: str) -> str | None:
-    raw = await api_get(f"{SOCHAIN}/transactions/LTC/{address}/1")
-    if raw:
-        txs = raw.get("transactions", [])
-        if txs:
-            return txs[0].get("hash") or txs[0].get("txid")
-    return None
+    raw = await api_get(f"{BLOCKCHAIR}/dashboards/address/{address}?limit=1")
+    if not raw:
+        return None
+    addr_data = raw.get("data", {}).get(address, {})
+    txs = addr_data.get("transactions", [])
+    return txs[0] if txs else None
 
 async def fetch_network() -> dict | None:
-    return await api_get(f"{SOCHAIN}/info/LTC")
+    raw = await api_get(f"{BLOCKCHAIR}/stats")
+    if raw:
+        return raw.get("data", {})
+    return None
 
 # ──────────────────────────────────────────────────────────────
 # UTILS
@@ -143,7 +159,7 @@ def tx_embed(tx: dict, title: str = "🔍 Transaction Details") -> hikari.Embed:
     if len(tx["outputs"]) > 3:
         receiver_str += f"\n*+{len(tx['outputs'])-3} more*"
     return (
-        hikari.Embed(title=title, url=f"https://sochain.com/tx/LTC/{txid}",
+        hikari.Embed(title=title, url=f"https://blockchair.com/litecoin/transaction/{txid}",
                      color=conf_color(confs), timestamp=datetime.now(timezone.utc))
         .set_author(name="Litecoin Network", icon=LTC_ICON)
         .add_field("🆔 TXID",   f"```{txid}```",                             inline=False)
@@ -259,7 +275,7 @@ async def poll_loop():
                             embed = (
                                 hikari.Embed(title="🔒 Transaction Fully Confirmed!",
                                              description=f"Reached **{confs} confirmations** — fully settled.",
-                                             url=f"https://sochain.com/tx/LTC/{txid}",
+                                             url=f"https://blockchair.com/litecoin/transaction/{txid}",
                                              color=C_GREEN, timestamp=datetime.now(timezone.utc))
                                 .set_author(name="Litecoin Network", icon=LTC_ICON)
                                 .add_field("🆔 TXID",          f"```{txid}```", inline=False)
@@ -466,15 +482,12 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
         embed = hikari.Embed(title="⛏️ Litecoin Network Stats", color=C_LTC, timestamp=datetime.now(timezone.utc))
         embed.set_author(name="Litecoin Network", icon=LTC_ICON)
         blocks = data.get("blocks", "N/A")
-        embed.add_field("📦 Block Height",    f"`{blocks:,}`" if isinstance(blocks, int) else f"`{blocks}`", inline=True)
-        embed.add_field("🌐 Network",         f"`{data.get('network','LTC')}`",                              inline=True)
-        try:
-            embed.add_field("⛏️ Difficulty",  f"`{float(data.get('difficulty',0)):,.0f}`",                  inline=True)
-        except Exception:
-            embed.add_field("⛏️ Difficulty",  f"`{data.get('difficulty','N/A')}`",                          inline=True)
-        embed.add_field("💵 Price",           f"`${data.get('price','N/A')} USD`",       inline=True)
-        embed.add_field("⏱️ Unconfirmed TXs", f"`{data.get('unconfirmed_txs','N/A')}`",  inline=True)
-        embed.add_field("🔗 Hashrate",        f"`{data.get('hashrate','N/A')}`",          inline=True)
+        embed.add_field("📦 Block Height",    f"`{blocks:,}`" if isinstance(blocks, int) else f"`{blocks}`",          inline=True)
+        embed.add_field("🌐 Network",         "`LTC`",                                                                inline=True)
+        embed.add_field("💵 Price",           f"`${data.get('market_price_usd','N/A')} USD`",                         inline=True)
+        embed.add_field("⏱️ Unconfirmed TXs", f"`{data.get('mempool_transactions','N/A')}`",                          inline=True)
+        embed.add_field("📊 24h TXs",         f"`{data.get('transactions_24h','N/A')}`",                              inline=True)
+        embed.add_field("⛏️ Difficulty",      f"`{data.get('difficulty','N/A')}`",                                    inline=True)
         embed.set_footer(text="Sochain API • No key required")
         await interaction.edit_initial_response(embed=embed)
 
