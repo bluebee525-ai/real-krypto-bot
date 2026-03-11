@@ -1,304 +1,125 @@
 """
-LTC Discord Bot - Auto-detects transactions + /checktx + DM notifications
-Hosted on Railway | Uses Sochain API (100% free, no signup or API key needed)
+╔══════════════════════════════════════════════════╗
+║        LTC Discord Bot  •  Python 3.13           ║
+║   Auto-detect transactions • DM notifications    ║
+║   /checktx • /watch • /invoice • /ltcstats       ║
+║   Powered by Sochain API (no key needed)         ║
+╚══════════════════════════════════════════════════╝
 """
 
-import discord
-from discord.ext import tasks
-import aiohttp
-import asyncio
 import os
 import io
-import qrcode
-from PIL import Image, ImageDraw, ImageFont
+import asyncio
 from datetime import datetime, timezone
-from typing import Optional
 
-# ─────────────────────────────────────────────────────────
-# CONFIG  (set these in Railway environment variables)
-# ─────────────────────────────────────────────────────────
-BOT_TOKEN        = os.environ["DISCORD_BOT_TOKEN"]          # required
-NOTIFY_USER_ID   = int(os.environ.get("NOTIFY_USER_ID", 0)) # your Discord user ID
-WATCH_ADDRESS    = os.environ.get("LTC_WATCH_ADDRESS", "")  # LTC address to auto-watch
-POLL_INTERVAL    = int(os.environ.get("POLL_INTERVAL", 30)) # seconds between polls
-REQUIRED_CONFS   = int(os.environ.get("REQUIRED_CONFS", 6)) # confirmations for "confirmed"
+import aiohttp
+import nextcord
+from nextcord.ext import commands, tasks
+import qrcode
 
-# Sochain V3 API — completely free, no API key, no signup
-SOCHAIN_BASE = "https://sochain.com/api/v3"
+# ──────────────────────────────────────────────────────────────
+# CONFIG  ·  All via Railway environment variables
+# ──────────────────────────────────────────────────────────────
+BOT_TOKEN      = os.environ["DISCORD_BOT_TOKEN"]
+NOTIFY_USER_ID = int(os.environ.get("NOTIFY_USER_ID", "0"))
+WATCH_ADDRESS  = os.environ.get("LTC_WATCH_ADDRESS", "")
+POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL", "30"))
+REQUIRED_CONFS = int(os.environ.get("REQUIRED_CONFS", "6"))
 
-# Colors
-C_LTC     = 0x345D9D
-C_GREEN   = 0x2ECC71
-C_RED     = 0xE74C3C
-C_ORANGE  = 0xF39C12
-C_SILVER  = 0xA8A8A8
-C_GOLD    = 0xFFD700
+SOCHAIN = "https://sochain.com/api/v3"
 
-# ─────────────────────────────────────────────────────────
-# BOT SETUP
-# ─────────────────────────────────────────────────────────
-intents = discord.Intents.default()
-bot = discord.Bot(intents=intents)
+C_LTC    = 0x345D9D
+C_GREEN  = 0x2ECC71
+C_RED    = 0xE74C3C
+C_ORANGE = 0xF39C12
+C_GREY   = 0x95A5A6
+LTC_ICON = "https://cryptologos.cc/logos/litecoin-ltc-logo.png"
 
-# State
-watched_addresses: dict[str, dict] = {}   # addr -> {last_tx_hash, channel_id}
-watched_txids: dict[str, dict] = {}       # txid -> {channel_id, user_id, last_confs, notified_confirmed}
-invoice_store: dict[str, dict] = {}
-invoice_counter = 0
+# ──────────────────────────────────────────────────────────────
+# BOT
+# ──────────────────────────────────────────────────────────────
+intents = nextcord.Intents.default()
+bot = commands.Bot(intents=intents)
+
+watched_addresses: dict = {}
+watched_txids:     dict = {}
+invoices:          dict = {}
+invoice_seq              = 0
 
 
-# ─────────────────────────────────────────────────────────
-# API HELPERS  (Sochain V3 — free, no key needed)
-# ─────────────────────────────────────────────────────────
-async def _get(url: str) -> dict | None:
-    async with aiohttp.ClientSession() as s:
-        async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                data = await r.json()
-                # Sochain wraps responses in {"data": {...}}
-                return data.get("data", data)
+# ──────────────────────────────────────────────────────────────
+# API HELPERS
+# ──────────────────────────────────────────────────────────────
+async def api_get(url: str) -> dict | None:
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status == 200:
+                    body = await r.json()
+                    return body.get("data", body)
+    except Exception as e:
+        print(f"[API] {e}")
     return None
 
-async def get_tx(txid: str) -> dict | None:
-    """Fetch a transaction and normalise to a common schema."""
-    raw = await _get(f"{SOCHAIN_BASE}/transaction/LTC/{txid}")
+
+async def fetch_tx(txid: str) -> dict | None:
+    raw = await api_get(f"{SOCHAIN}/transaction/LTC/{txid}")
     if not raw:
         return None
-    # Normalise Sochain fields → our internal schema
-    confs = int(raw.get("confirmations", 0))
-    # total output value
-    total_sats = sum(
-        int(float(o.get("value", 0)) * 1e8)
+    outputs = [
+        {"addresses": [o["address"]] if o.get("address") else [], "value_ltc": float(o.get("value", 0))}
         for o in raw.get("outputs", [])
-    )
-    fee_sats = int(float(raw.get("fee", 0)) * 1e8)
+    ]
     return {
-        "hash":          raw.get("hash") or raw.get("txid", txid),
-        "confirmations": confs,
-        "total":         total_sats,
-        "fees":          fee_sats,
+        "hash":          raw.get("hash", txid),
+        "confirmations": int(raw.get("confirmations", 0)),
+        "total_ltc":     sum(o["value_ltc"] for o in outputs),
+        "fee_ltc":       float(raw.get("fee", 0)),
         "size":          raw.get("size", 0),
-        "confirmed":     raw.get("time"),
-        "received":      raw.get("time"),
-        "inputs":        [
-            {"addresses": [i.get("address")] if i.get("address") else []}
-            for i in raw.get("inputs", [])
-        ],
-        "outputs":       [
-            {
-                "addresses": [o.get("address")] if o.get("address") else [],
-                "value":     int(float(o.get("value", 0)) * 1e8),
-            }
-            for o in raw.get("outputs", [])
-        ],
+        "time":          raw.get("time", ""),
+        "inputs":        [{"addresses": [i["address"]] if i.get("address") else []} for i in raw.get("inputs", [])],
+        "outputs":       outputs,
     }
 
-async def get_address_txs(address: str) -> dict | None:
-    """Return latest txs for an address. Returns normalised dict with 'txrefs' list."""
-    raw = await _get(f"{SOCHAIN_BASE}/transactions/LTC/{address}/1")
-    if not raw:
-        return None
-    txs = raw.get("transactions", [])
-    return {
-        "txrefs": [{"tx_hash": t.get("hash") or t.get("txid")} for t in txs if t.get("hash") or t.get("txid")]
-    }
 
-async def get_network_stats() -> dict | None:
-    """Fetch LTC network info from Sochain."""
-    return await _get(f"{SOCHAIN_BASE}/info/LTC")
+async def fetch_latest_tx_hash(address: str) -> str | None:
+    raw = await api_get(f"{SOCHAIN}/transactions/LTC/{address}/1")
+    if raw:
+        txs = raw.get("transactions", [])
+        if txs:
+            return txs[0].get("hash") or txs[0].get("txid")
+    return None
 
-def satoshi_to_ltc(sats: int) -> float:
-    return sats / 1e8
 
-def confirmation_bar(confs: int, required: int = 6) -> str:
-    filled = min(confs, required)
-    bar = "█" * filled + "░" * (required - filled)
-    return f"`[{bar}]` {confs}/{required}"
+async def fetch_network() -> dict | None:
+    return await api_get(f"{SOCHAIN}/info/LTC")
 
-def conf_color(confs: int) -> int:
-    if confs == 0:   return C_ORANGE
-    if confs < 3:    return C_SILVER
-    if confs < 6:    return C_LTC
-    return C_GREEN
 
-def tx_status_label(confs: int) -> str:
-    if confs == 0:  return "⏳ Unconfirmed (mempool)"
-    if confs < 3:   return "🔄 Confirming..."
-    if confs < 6:   return "✅ Partially Confirmed"
+# ──────────────────────────────────────────────────────────────
+# UTILS
+# ──────────────────────────────────────────────────────────────
+def conf_bar(confs: int) -> str:
+    f = min(confs, REQUIRED_CONFS)
+    return f"`{'█'*f}{'░'*(REQUIRED_CONFS-f)}` {confs}/{REQUIRED_CONFS}"
+
+def conf_color(c: int) -> int:
+    return C_ORANGE if c == 0 else (C_GREEN if c >= REQUIRED_CONFS else C_LTC)
+
+def status_label(c: int) -> str:
+    if c == 0:              return "⏳ Unconfirmed (mempool)"
+    if c < 3:               return "🔄 Confirming…"
+    if c < REQUIRED_CONFS: return "✅ Partially Confirmed"
     return "🔒 Fully Confirmed"
 
-
-# ─────────────────────────────────────────────────────────
-# EMBED BUILDERS
-# ─────────────────────────────────────────────────────────
-def build_tx_embed(tx: dict, title: str = "🔍 Transaction Details") -> discord.Embed:
-    txid    = tx.get("hash", "N/A")
-    confs   = tx.get("confirmations", 0)
-    total   = tx.get("total", 0)
-    fees    = tx.get("fees", 0)
-    size    = tx.get("size", 0)
-    t       = tx.get("confirmed") or tx.get("received", "")
-
-    inputs  = tx.get("inputs", [])
-    outputs = tx.get("outputs", [])
-
-    # Sender addresses
-    senders = []
-    for inp in inputs[:3]:
-        addrs = inp.get("addresses", [])
-        senders += addrs
-    sender_str = "\n".join(f"`{a}`" for a in senders[:3]) or "Coinbase / Unknown"
-    if len(inputs) > 3:
-        sender_str += f"\n*+{len(inputs)-3} more*"
-
-    # Receiver addresses
-    receivers = []
-    for out in outputs[:3]:
-        addrs = out.get("addresses", [])
-        val   = satoshi_to_ltc(out.get("value", 0))
-        for a in addrs:
-            receivers.append(f"`{a}` — **{val:.6f} LTC**")
-    receiver_str = "\n".join(receivers[:3]) or "Unknown"
-    if len(outputs) > 3:
-        receiver_str += f"\n*+{len(outputs)-3} more*"
-
-    # Time
+def fmt_time(raw) -> str:
     try:
-        dt = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
-        time_str = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
-        time_str = str(t) or "Pending"
+        return str(raw) or "Pending"
 
-    embed = discord.Embed(
-        title=title,
-        color=conf_color(confs),
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_author(
-        name="Litecoin Network",
-        icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png"
-    )
-    embed.add_field(
-        name="🆔 TXID",
-        value=f"```{txid}```",
-        inline=False
-    )
-    embed.add_field(
-        name="💰 Amount",
-        value=f"**{satoshi_to_ltc(total):.8f} LTC**",
-        inline=True
-    )
-    embed.add_field(
-        name="⛽ Fee",
-        value=f"{satoshi_to_ltc(fees):.8f} LTC",
-        inline=True
-    )
-    embed.add_field(
-        name="📦 Size",
-        value=f"{size} bytes",
-        inline=True
-    )
-    embed.add_field(
-        name="📊 Status",
-        value=f"{tx_status_label(confs)}\n{confirmation_bar(confs, REQUIRED_CONFS)}",
-        inline=False
-    )
-    embed.add_field(name="📤 From",    value=sender_str,   inline=True)
-    embed.add_field(name="📥 To",      value=receiver_str, inline=True)
-    embed.add_field(name="🕐 Time",    value=time_str,      inline=False)
-    embed.set_footer(
-        text=f"View on Explorer",
-        icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png"
-    )
-    embed.url = f"https://sochain.com/tx/LTC/{txid}"
-    return embed
-
-
-def build_new_tx_embed(tx: dict, address: str) -> discord.Embed:
-    embed = build_tx_embed(tx, title="🚨 New Incoming Transaction Detected!")
-    embed.color = C_ORANGE
-    embed.insert_field_at(0,
-        name="📍 Watched Address",
-        value=f"`{address}`",
-        inline=False
-    )
-    return embed
-
-
-def build_confirmed_embed(txid: str, confs: int) -> discord.Embed:
-    embed = discord.Embed(
-        title="🔒 Transaction Fully Confirmed!",
-        description=f"Your transaction has reached **{confs} confirmations** and is now fully settled on the Litecoin blockchain.",
-        color=C_GREEN,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_author(
-        name="Litecoin Network",
-        icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png"
-    )
-    embed.add_field(name="🆔 TXID", value=f"```{txid}```", inline=False)
-    embed.add_field(
-        name="📊 Confirmations",
-        value=confirmation_bar(confs, REQUIRED_CONFS),
-        inline=False
-    )
-    embed.url = f"https://sochain.com/tx/LTC/{txid}"
-    embed.set_footer(text="Litecoin Bot • Powered by Sochain")
-    return embed
-
-
-def build_invoice_embed(inv: dict) -> discord.Embed:
-    status_map = {
-        "pending":   ("⏳ Awaiting Payment", C_ORANGE),
-        "paid":      ("✅ Paid & Confirmed",  C_GREEN),
-        "expired":   ("❌ Expired",           C_RED),
-    }
-    label, color = status_map.get(inv["status"], ("❓ Unknown", C_SILVER))
-
-    embed = discord.Embed(
-        title=f"🧾 Invoice #{inv['id']}",
-        description=f"**{inv.get('description', 'Litecoin Payment')}**",
-        color=color,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_author(
-        name="Litecoin Invoice",
-        icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png"
-    )
-    embed.add_field(name="💎 Amount",  value=f"**{inv['amount']} LTC**",  inline=True)
-    embed.add_field(name="📌 Status",  value=label,                        inline=True)
-    embed.add_field(name="🔢 Invoice", value=f"`#{inv['id']}`",            inline=True)
-    embed.add_field(
-        name="📬 Pay To",
-        value=f"```{inv['address']}```",
-        inline=False
-    )
-    if inv.get("txid"):
-        embed.add_field(name="🔗 TXID", value=f"```{inv['txid']}```", inline=False)
-    embed.add_field(
-        name="📋 How to Pay",
-        value=(
-            f"Send exactly **{inv['amount']} LTC** to the address above.\n"
-            f"The bot will automatically detect and confirm your payment."
-        ),
-        inline=False
-    )
-    embed.set_footer(text=f"Created by {inv['creator']} • Invoice Bot")
-    return embed
-
-
-# ─────────────────────────────────────────────────────────
-# QR CODE GENERATOR
-# ─────────────────────────────────────────────────────────
-def make_qr_image(address: str, amount: float) -> io.BytesIO:
-    data = f"litecoin:{address}?amount={amount}"
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_H,
-        box_size=10,
-        border=4,
-    )
-    qr.add_data(data)
+def make_qr(address: str, amount: float) -> io.BytesIO:
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=10, border=4)
+    qr.add_data(f"litecoin:{address}?amount={amount}")
     qr.make(fit=True)
     img = qr.make_image(fill_color="#345D9D", back_color="white")
     buf = io.BytesIO()
@@ -307,346 +128,341 @@ def make_qr_image(address: str, amount: float) -> io.BytesIO:
     return buf
 
 
-# ─────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# EMBED BUILDERS
+# ──────────────────────────────────────────────────────────────
+def tx_embed(tx: dict, title: str = "🔍 Transaction Details") -> nextcord.Embed:
+    confs = tx["confirmations"]
+    txid  = tx["hash"]
+
+    senders = []
+    for i in tx["inputs"][:3]:
+        senders += i["addresses"]
+    sender_str = "\n".join(f"`{a}`" for a in senders[:3]) or "Coinbase / Unknown"
+    if len(tx["inputs"]) > 3:
+        sender_str += f"\n*+{len(tx['inputs'])-3} more*"
+
+    recv_lines = []
+    for o in tx["outputs"][:3]:
+        for addr in o["addresses"]:
+            recv_lines.append(f"`{addr}` — **{o['value_ltc']:.6f} LTC**")
+    receiver_str = "\n".join(recv_lines[:3]) or "Unknown"
+    if len(tx["outputs"]) > 3:
+        receiver_str += f"\n*+{len(tx['outputs'])-3} more*"
+
+    embed = nextcord.Embed(title=title, url=f"https://sochain.com/tx/LTC/{txid}",
+                           color=conf_color(confs), timestamp=datetime.now(timezone.utc))
+    embed.set_author(name="Litecoin Network", icon_url=LTC_ICON)
+    embed.add_field(name="🆔 TXID",    value=f"```{txid}```",                             inline=False)
+    embed.add_field(name="💰 Amount",  value=f"**{tx['total_ltc']:.8f} LTC**",            inline=True)
+    embed.add_field(name="⛽ Fee",     value=f"{tx['fee_ltc']:.8f} LTC",                  inline=True)
+    embed.add_field(name="📦 Size",    value=f"{tx['size']} bytes",                       inline=True)
+    embed.add_field(name="📊 Status",  value=f"{status_label(confs)}\n{conf_bar(confs)}", inline=False)
+    embed.add_field(name="📤 From",    value=sender_str,                                  inline=True)
+    embed.add_field(name="📥 To",      value=receiver_str,                                inline=True)
+    embed.add_field(name="🕐 Time",    value=fmt_time(tx["time"]),                        inline=False)
+    embed.set_footer(text="Sochain Explorer", icon_url=LTC_ICON)
+    return embed
+
+
+def invoice_embed(inv: dict) -> nextcord.Embed:
+    labels = {"pending": ("⏳ Awaiting Payment", C_ORANGE), "paid": ("✅ Paid", C_GREEN), "expired": ("❌ Expired", C_RED)}
+    label, color = labels.get(inv["status"], ("❓ Unknown", C_GREY))
+    embed = nextcord.Embed(title=f"🧾 Invoice #{inv['id']}", description=f"**{inv.get('description','Litecoin Payment')}**",
+                           color=color, timestamp=datetime.now(timezone.utc))
+    embed.set_author(name="Litecoin Invoice", icon_url=LTC_ICON)
+    embed.add_field(name="💎 Amount", value=f"**{inv['amount']} LTC**", inline=True)
+    embed.add_field(name="📌 Status", value=label,                      inline=True)
+    embed.add_field(name="🔢 ID",     value=f"`#{inv['id']}`",          inline=True)
+    embed.add_field(name="📬 Pay To", value=f"```{inv['address']}```",  inline=False)
+    if inv.get("txid"):
+        embed.add_field(name="🔗 TXID", value=f"```{inv['txid']}```",  inline=False)
+    embed.add_field(name="📋 Instructions",
+                    value=f"Send exactly **{inv['amount']} LTC** to the address above.\nThe bot will auto-detect your payment.",
+                    inline=False)
+    embed.set_footer(text=f"Created by {inv['creator']}")
+    return embed
+
+
+# ──────────────────────────────────────────────────────────────
+# NOTIFICATION HELPERS
+# ──────────────────────────────────────────────────────────────
+async def dm_user(user_id: int, embed: nextcord.Embed, file: nextcord.File | None = None):
+    if not user_id:
+        return
+    try:
+        user = await bot.fetch_user(user_id)
+        kwargs = {"embed": embed}
+        if file:
+            kwargs["file"] = file
+        await user.send(**kwargs)
+    except Exception as e:
+        print(f"[DM] {user_id}: {e}")
+
+
+async def notify(embed: nextcord.Embed, channel_id: int | None, user_id: int | None):
+    if channel_id:
+        try:
+            ch = bot.get_channel(channel_id)
+            if ch:
+                await ch.send(embed=embed)
+        except Exception as e:
+            print(f"[Notify] {e}")
+    if user_id:
+        await dm_user(user_id, embed)
+
+
+# ──────────────────────────────────────────────────────────────
 # BACKGROUND TASKS
-# ─────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 @tasks.loop(seconds=POLL_INTERVAL)
 async def poll_addresses():
-    """Auto-detect new transactions on watched addresses."""
-    if not watched_addresses:
-        return
     for address, state in list(watched_addresses.items()):
         try:
-            data = await get_address_txs(address)
-            if not data:
+            latest = await fetch_latest_tx_hash(address)
+            if not latest or state.get("last_tx_hash") == latest:
                 continue
-            txrefs = data.get("txrefs", []) + data.get("unconfirmed_txrefs", [])
-            if not txrefs:
+            watched_addresses[address]["last_tx_hash"] = latest
+            tx = await fetch_tx(latest)
+            if not tx:
                 continue
-            latest = txrefs[0]
-            latest_hash = latest.get("tx_hash")
-            if not latest_hash:
-                continue
-
-            if state.get("last_tx_hash") != latest_hash:
-                # New transaction detected!
-                watched_addresses[address]["last_tx_hash"] = latest_hash
-                tx = await get_tx(latest_hash)
-                if not tx:
-                    continue
-
-                # Notify user via DM
-                if NOTIFY_USER_ID:
-                    try:
-                        user = await bot.fetch_user(NOTIFY_USER_ID)
-                        embed = build_new_tx_embed(tx, address)
-                        await user.send(embed=embed)
-                    except Exception as e:
-                        print(f"DM error: {e}")
-
-                # Also post in channel if set
-                channel_id = state.get("channel_id")
-                if channel_id:
-                    try:
-                        ch = bot.get_channel(channel_id)
-                        if ch:
-                            embed = build_new_tx_embed(tx, address)
-                            await ch.send(embed=embed)
-                    except Exception as e:
-                        print(f"Channel notify error: {e}")
-
-                # Auto-watch this txid for confirmations
-                watched_txids[latest_hash] = {
-                    "channel_id":        state.get("channel_id"),
-                    "user_id":           NOTIFY_USER_ID,
-                    "last_confs":        tx.get("confirmations", 0),
-                    "notified_confirmed": False,
+            embed = tx_embed(tx, title="🚨 New Incoming Transaction!")
+            embed.color = C_ORANGE
+            embed.insert_field_at(0, name="📍 Watched Address", value=f"`{address}`", inline=False)
+            await notify(embed, state.get("channel_id"), NOTIFY_USER_ID)
+            if latest not in watched_txids:
+                watched_txids[latest] = {
+                    "channel_id": state.get("channel_id"),
+                    "user_id":    NOTIFY_USER_ID,
+                    "last_confs": tx["confirmations"],
+                    "done":       tx["confirmations"] >= REQUIRED_CONFS,
                 }
         except Exception as e:
-            print(f"poll_addresses error for {address}: {e}")
+            print(f"[Poll Addr] {address}: {e}")
 
 
 @tasks.loop(seconds=POLL_INTERVAL)
 async def poll_txids():
-    """Poll watched TXIDs for confirmation updates."""
     for txid, state in list(watched_txids.items()):
+        if state.get("done"):
+            continue
         try:
-            tx = await get_tx(txid)
+            tx = await fetch_tx(txid)
             if not tx:
                 continue
-            confs = tx.get("confirmations", 0)
-            last  = state.get("last_confs", 0)
-
-            # Update stored confs
+            confs = tx["confirmations"]
+            prev  = state["last_confs"]
             watched_txids[txid]["last_confs"] = confs
-
-            # Notify at milestone confirmations: 1, 3, 6
-            milestones = [1, 3, REQUIRED_CONFS]
-            for m in milestones:
-                if last < m <= confs:
-                    await send_conf_update(txid, tx, state, confs)
+            for milestone in [1, 3, REQUIRED_CONFS]:
+                if prev < milestone <= confs:
+                    if confs >= REQUIRED_CONFS:
+                        embed = nextcord.Embed(
+                            title="🔒 Transaction Fully Confirmed!",
+                            description=f"Reached **{confs} confirmations** — fully settled.",
+                            url=f"https://sochain.com/tx/LTC/{txid}",
+                            color=C_GREEN, timestamp=datetime.now(timezone.utc))
+                        embed.set_author(name="Litecoin Network", icon_url=LTC_ICON)
+                        embed.add_field(name="🆔 TXID",          value=f"```{txid}```", inline=False)
+                        embed.add_field(name="📊 Confirmations", value=conf_bar(confs), inline=False)
+                        watched_txids[txid]["done"] = True
+                    else:
+                        embed = tx_embed(tx, title=f"🔄 {confs} Confirmation{'s' if confs!=1 else ''}")
+                    await notify(embed, state.get("channel_id"), state.get("user_id"))
                     break
-
-            # Final confirmation notification
-            if confs >= REQUIRED_CONFS and not state.get("notified_confirmed"):
-                watched_txids[txid]["notified_confirmed"] = True
-                await send_final_confirmed(txid, confs, state)
-
         except Exception as e:
-            print(f"poll_txids error for {txid}: {e}")
+            print(f"[Poll TX] {txid[:16]}: {e}")
 
 
-async def send_conf_update(txid: str, tx: dict, state: dict, confs: int):
-    embed = build_tx_embed(tx, title=f"🔄 Confirmation Update — {confs} conf{'s' if confs != 1 else ''}")
-    user_id = state.get("user_id")
-    if user_id:
-        try:
-            user = await bot.fetch_user(user_id)
-            await user.send(embed=embed)
-        except Exception as e:
-            print(f"send_conf_update DM error: {e}")
-    channel_id = state.get("channel_id")
-    if channel_id:
-        try:
-            ch = bot.get_channel(channel_id)
-            if ch:
-                await ch.send(embed=embed)
-        except Exception:
-            pass
-
-
-async def send_final_confirmed(txid: str, confs: int, state: dict):
-    embed = build_confirmed_embed(txid, confs)
-    user_id = state.get("user_id")
-    if user_id:
-        try:
-            user = await bot.fetch_user(user_id)
-            await user.send(embed=embed)
-        except Exception as e:
-            print(f"final confirmed DM error: {e}")
-    channel_id = state.get("channel_id")
-    if channel_id:
-        try:
-            ch = bot.get_channel(channel_id)
-            if ch:
-                await ch.send(embed=embed)
-        except Exception:
-            pass
-
-
-# ─────────────────────────────────────────────────────────
-# SLASH COMMANDS  (py-cord syntax)
-# ─────────────────────────────────────────────────────────
-
+# ──────────────────────────────────────────────────────────────
+# SLASH COMMANDS
+# ──────────────────────────────────────────────────────────────
 @bot.slash_command(name="checktx", description="Look up a Litecoin transaction by TXID")
-async def checktx(ctx: discord.ApplicationContext, txid: discord.Option(str, "The Litecoin transaction ID (64 hex characters)")):
-    await ctx.defer()
-    txid = txid.strip()
-    if len(txid) != 64 or not all(c in "0123456789abcdefABCDEF" for c in txid):
-        embed = discord.Embed(title="❌ Invalid TXID", description="Please provide a valid 64-character hex transaction ID.", color=C_RED)
-        await ctx.respond(embed=embed)
+async def checktx(
+    interaction: nextcord.Interaction,
+    txid: str = nextcord.SlashOption(description="64-character hex transaction ID"),
+):
+    await interaction.response.defer()
+    txid = txid.strip().lower()
+    if len(txid) != 64 or not all(c in "0123456789abcdef" for c in txid):
+        await interaction.followup.send(embed=nextcord.Embed(title="❌ Invalid TXID",
+            description="Must be a 64-character hex string.", color=C_RED))
         return
-
-    tx = await get_tx(txid)
+    tx = await fetch_tx(txid)
     if not tx:
-        embed = discord.Embed(title="❌ Transaction Not Found", description=f"Could not find:\n```{txid}```\nMake sure this is a valid LTC txid.", color=C_RED)
-        await ctx.respond(embed=embed)
+        await interaction.followup.send(embed=nextcord.Embed(title="❌ Not Found",
+            description=f"No transaction found for:\n```{txid}```", color=C_RED))
         return
-
-    embed = build_tx_embed(tx)
-    confs = tx.get("confirmations", 0)
-
-    if confs < REQUIRED_CONFS:
-        watched_txids[txid] = {
-            "channel_id": ctx.channel_id,
-            "user_id": ctx.author.id,
-            "last_confs": confs,
-            "notified_confirmed": False,
-        }
-        embed.set_footer(text=f"👁️ Now watching — you'll be DM'd at 1, 3 & {REQUIRED_CONFS} confs")
-
-    await ctx.respond(embed=embed)
-    try:
-        await ctx.author.send(embed=embed)
-    except Exception:
-        pass
+    embed = tx_embed(tx)
+    if tx["confirmations"] < REQUIRED_CONFS:
+        watched_txids[txid] = {"channel_id": interaction.channel_id, "user_id": interaction.user.id,
+                               "last_confs": tx["confirmations"], "done": False}
+        embed.set_footer(text=f"👁️ Watching — DM at 1, 3 & {REQUIRED_CONFS} confs | Sochain")
+    await interaction.followup.send(embed=embed)
+    await dm_user(interaction.user.id, embed)
 
 
-@bot.slash_command(name="watch", description="Watch a Litecoin address for incoming transactions")
-async def watch(ctx: discord.ApplicationContext, address: discord.Option(str, "The LTC address to monitor")):
-    await ctx.defer(ephemeral=True)
+@bot.slash_command(name="watch", description="Watch a Litecoin address for new incoming transactions")
+async def watch(
+    interaction: nextcord.Interaction,
+    address: str = nextcord.SlashOption(description="LTC address (starts with L, M or ltc1)"),
+):
+    await interaction.response.defer(ephemeral=True)
     address = address.strip()
-
     if not (address.startswith(("L", "M", "ltc1")) and 26 <= len(address) <= 62):
-        embed = discord.Embed(title="❌ Invalid LTC Address", description="Please provide a valid Litecoin address (starts with L, M, or ltc1).", color=C_RED)
-        await ctx.respond(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=nextcord.Embed(title="❌ Invalid Address",
+            description="Please provide a valid Litecoin address.", color=C_RED), ephemeral=True)
         return
-
-    data = await get_address_txs(address)
-    last_hash = None
-    if data:
-        txrefs = data.get("txrefs", [])
-        if txrefs:
-            last_hash = txrefs[0].get("tx_hash")
-
-    watched_addresses[address] = {"channel_id": ctx.channel_id, "last_tx_hash": last_hash}
-
-    embed = discord.Embed(title="👁️ Address Now Being Watched", description="I'll notify you in this channel **and DM you** when new transactions arrive.", color=C_LTC)
-    embed.add_field(name="📬 Address", value=f"```{address}```", inline=False)
-    embed.add_field(name="🔔 Notifications", value=f"• New transaction detected\n• Confirmations: 1 → 3 → {REQUIRED_CONFS}\n• Final confirmation", inline=False)
-    embed.set_footer(text=f"Polling every {POLL_INTERVAL}s • Powered by Sochain")
-    await ctx.respond(embed=embed, ephemeral=True)
+    last = await fetch_latest_tx_hash(address)
+    watched_addresses[address] = {"channel_id": interaction.channel_id, "last_tx_hash": last}
+    embed = nextcord.Embed(title="👁️ Now Watching", color=C_LTC, timestamp=datetime.now(timezone.utc))
+    embed.set_author(name="Litecoin Monitor", icon_url=LTC_ICON)
+    embed.add_field(name="📬 Address",       value=f"```{address}```",                                                         inline=False)
+    embed.add_field(name="🔔 Notifications", value=f"DM on new TX\nConf updates at 1 → 3 → {REQUIRED_CONFS}", inline=False)
+    embed.set_footer(text=f"Polling every {POLL_INTERVAL}s • Sochain API")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.slash_command(name="unwatch", description="Stop watching a Litecoin address")
-async def unwatch(ctx: discord.ApplicationContext, address: discord.Option(str, "The LTC address to stop monitoring")):
+async def unwatch(
+    interaction: nextcord.Interaction,
+    address: str = nextcord.SlashOption(description="LTC address to stop monitoring"),
+):
     address = address.strip()
     if address in watched_addresses:
         del watched_addresses[address]
-        embed = discord.Embed(title="🛑 Stopped Watching", description=f"No longer monitoring `{address}`", color=C_SILVER)
+        embed = nextcord.Embed(title="🛑 Stopped Watching", description=f"`{address}`", color=C_GREY)
     else:
-        embed = discord.Embed(title="❓ Not Found", description=f"`{address}` is not currently being watched.", color=C_RED)
-    await ctx.respond(embed=embed, ephemeral=True)
+        embed = nextcord.Embed(title="❓ Not Watching", description=f"`{address}` was not being watched.", color=C_RED)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.slash_command(name="watchlist", description="See all currently watched LTC addresses")
-async def watchlist(ctx: discord.ApplicationContext):
+@bot.slash_command(name="watchlist", description="Show all watched addresses and transactions")
+async def watchlist(interaction: nextcord.Interaction):
     if not watched_addresses and not watched_txids:
-        embed = discord.Embed(title="📭 Nothing Watched", description="No addresses or transactions are currently being monitored.\nUse `/watch <address>` to start.", color=C_SILVER)
-        await ctx.respond(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=nextcord.Embed(title="📭 Watch List Empty",
+            description="Use `/watch <address>` to start.", color=C_GREY), ephemeral=True)
         return
-
-    embed = discord.Embed(title="👁️ Watch List", color=C_LTC, timestamp=datetime.now(timezone.utc))
+    embed = nextcord.Embed(title="👁️ Watch List", color=C_LTC, timestamp=datetime.now(timezone.utc))
     if watched_addresses:
-        addr_lines = "\n".join(f"• `{a}`" for a in watched_addresses)
-        embed.add_field(name=f"📬 Addresses ({len(watched_addresses)})", value=addr_lines, inline=False)
-    if watched_txids:
-        tx_lines = [f"• `{txid[:16]}...` — {s.get('last_confs', 0)} conf(s)" for txid, s in list(watched_txids.items())[:10]]
-        embed.add_field(name=f"🔗 Transactions ({len(watched_txids)})", value="\n".join(tx_lines), inline=False)
-    await ctx.respond(embed=embed, ephemeral=True)
+        embed.add_field(name=f"📬 Addresses ({len(watched_addresses)})",
+                        value="\n".join(f"• `{a}`" for a in list(watched_addresses)[:15]), inline=False)
+    active = {k: v for k, v in watched_txids.items() if not v.get("done")}
+    if active:
+        embed.add_field(name=f"🔗 Active TXs ({len(active)})",
+                        value="\n".join(f"• `{t[:20]}…` — {s['last_confs']} conf(s)" for t, s in list(active.items())[:10]),
+                        inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.slash_command(name="invoice", description="Create a Litecoin payment invoice with QR code")
 async def invoice(
-    ctx: discord.ApplicationContext,
-    address: discord.Option(str, "Your LTC receiving address"),
-    amount: discord.Option(float, "Amount in LTC"),
-    description: discord.Option(str, "What the payment is for", default="Litecoin Payment"),
+    interaction: nextcord.Interaction,
+    address: str   = nextcord.SlashOption(description="Your LTC receiving address"),
+    amount:  float = nextcord.SlashOption(description="Amount in LTC"),
+    description: str = nextcord.SlashOption(description="What the payment is for", required=False, default="Litecoin Payment"),
 ):
-    await ctx.defer()
-    global invoice_counter
-    invoice_counter += 1
-    inv_id = f"{invoice_counter:04d}"
-
+    await interaction.response.defer()
+    global invoice_seq
     if amount <= 0:
-        await ctx.respond("❌ Amount must be greater than 0.", ephemeral=True)
+        await interaction.followup.send("❌ Amount must be greater than 0.", ephemeral=True)
         return
-
-    inv = {
-        "id": inv_id, "address": address.strip(), "amount": amount,
-        "description": description, "status": "pending", "txid": None,
-        "creator": str(ctx.author), "channel_id": ctx.channel_id, "user_id": ctx.author.id,
-    }
-    invoice_store[inv_id] = inv
-
+    invoice_seq += 1
+    inv = {"id": f"{invoice_seq:04d}", "address": address.strip(), "amount": round(amount, 8),
+           "description": description, "status": "pending", "txid": None,
+           "creator": str(interaction.user), "channel_id": interaction.channel_id, "user_id": interaction.user.id}
+    invoices[inv["id"]] = inv
     if address not in watched_addresses:
-        data = await get_address_txs(address)
-        last_hash = None
-        if data:
-            txrefs = data.get("txrefs", [])
-            if txrefs:
-                last_hash = txrefs[0].get("tx_hash")
-        watched_addresses[address] = {"channel_id": ctx.channel_id, "last_tx_hash": last_hash}
-
-    embed = build_invoice_embed(inv)
-    qr_buf = make_qr_image(address, amount)
-    file = discord.File(qr_buf, filename="invoice_qr.png")
-    embed.set_image(url="attachment://invoice_qr.png")
-    await ctx.respond(embed=embed, file=file)
-
+        last = await fetch_latest_tx_hash(address)
+        watched_addresses[address] = {"channel_id": interaction.channel_id, "last_tx_hash": last}
+    embed = invoice_embed(inv)
+    qr_buf = make_qr(address, amount)
+    file   = nextcord.File(qr_buf, filename="qr.png")
+    embed.set_image(url="attachment://qr.png")
+    await interaction.followup.send(embed=embed, file=file)
     try:
-        qr_buf2 = make_qr_image(address, amount)
-        file2 = discord.File(qr_buf2, filename="invoice_qr.png")
-        embed2 = build_invoice_embed(inv)
-        embed2.set_image(url="attachment://invoice_qr.png")
-        await ctx.author.send(embed=embed2, file=file2)
+        embed2 = invoice_embed(inv)
+        qr2    = make_qr(address, amount)
+        file2  = nextcord.File(qr2, filename="qr.png")
+        embed2.set_image(url="attachment://qr.png")
+        await interaction.user.send(embed=embed2, file=file2)
     except Exception:
         pass
 
 
-@bot.slash_command(name="invoicestatus", description="Check status of an invoice")
-async def invoicestatus(ctx: discord.ApplicationContext, invoice_id: discord.Option(str, "Invoice ID (e.g. 0001)")):
-    inv = invoice_store.get(invoice_id.zfill(4))
+@bot.slash_command(name="invoicestatus", description="Check the status of an invoice")
+async def invoicestatus(
+    interaction: nextcord.Interaction,
+    invoice_id: str = nextcord.SlashOption(description="Invoice ID e.g. 0001"),
+):
+    inv = invoices.get(invoice_id.zfill(4))
     if not inv:
-        embed = discord.Embed(title="❌ Invoice Not Found", description=f"No invoice with ID `{invoice_id}` found.", color=C_RED)
-        await ctx.respond(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=nextcord.Embed(title="❌ Not Found",
+            description=f"No invoice `{invoice_id}`.", color=C_RED), ephemeral=True)
         return
-    await ctx.respond(embed=build_invoice_embed(inv))
+    await interaction.response.send_message(embed=invoice_embed(inv))
 
 
-@bot.slash_command(name="ltcstats", description="Show Litecoin network stats")
-async def ltcstats(ctx: discord.ApplicationContext):
-    await ctx.defer()
-    data = await get_network_stats()
+@bot.slash_command(name="ltcstats", description="Show live Litecoin network stats")
+async def ltcstats(interaction: nextcord.Interaction):
+    await interaction.response.defer()
+    data = await fetch_network()
     if not data:
-        await ctx.respond("❌ Could not fetch network stats.", ephemeral=True)
+        await interaction.followup.send("❌ Could not reach Sochain API.", ephemeral=True)
         return
+    embed = nextcord.Embed(title="⛏️ Litecoin Network Stats", color=C_LTC, timestamp=datetime.now(timezone.utc))
+    embed.set_author(name="Litecoin Network", icon_url=LTC_ICON)
+    blocks = data.get("blocks", "N/A")
+    embed.add_field(name="📦 Block Height",    value=f"`{blocks:,}`" if isinstance(blocks, int) else f"`{blocks}`", inline=True)
+    embed.add_field(name="🌐 Network",         value=f"`{data.get('network','LTC')}`",                              inline=True)
+    try:
+        embed.add_field(name="⛏️ Difficulty",  value=f"`{float(data.get('difficulty',0)):,.0f}`",                  inline=True)
+    except Exception:
+        embed.add_field(name="⛏️ Difficulty",  value=f"`{data.get('difficulty','N/A')}`",                          inline=True)
+    embed.add_field(name="💵 Price",           value=f"`${data.get('price','N/A')} USD`",                          inline=True)
+    embed.add_field(name="⏱️ Unconfirmed TXs", value=f"`{data.get('unconfirmed_txs','N/A')}`",                    inline=True)
+    embed.add_field(name="🔗 Hashrate",        value=f"`{data.get('hashrate','N/A')}`",                            inline=True)
+    embed.set_footer(text="Sochain API • No key required")
+    await interaction.followup.send(embed=embed)
 
-    embed = discord.Embed(title="⛏️ Litecoin Network Stats", color=C_LTC, timestamp=datetime.now(timezone.utc))
-    embed.set_author(name="Litecoin Network", icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png")
-    embed.add_field(name="📦 Block Height",    value=f"`{data.get('blocks', 'N/A'):,}`",           inline=True)
-    embed.add_field(name="🔗 Network",         value=f"`{data.get('network', 'LTC')}`",            inline=True)
-    embed.add_field(name="⛏️ Difficulty",      value=f"`{float(data.get('difficulty', 0)):,.2f}`", inline=True)
-    embed.add_field(name="💸 LTC Price",       value=f"`{data.get('price', 'N/A')} USD`",          inline=True)
-    embed.add_field(name="🏷️ Hashrate",        value=f"`{data.get('hashrate', 'N/A')}`",           inline=True)
-    embed.add_field(name="⏱️ Unconfirmed TXs", value=f"`{data.get('unconfirmed_txs', 'N/A')}`",   inline=True)
-    embed.set_footer(text="Data from Sochain API • No API key required")
-    await ctx.respond(embed=embed)
 
-
-@bot.slash_command(name="help", description="Show all available bot commands")
-async def help_cmd(ctx: discord.ApplicationContext):
-    embed = discord.Embed(title="🪙 LTC Bot — Command Help", description="A Litecoin transaction monitor & invoice bot.", color=C_LTC, timestamp=datetime.now(timezone.utc))
-    embed.set_author(name="LTC Bot", icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png")
-    embed.add_field(name="🔍 Transaction Commands", value=(
+@bot.slash_command(name="help", description="Show all bot commands")
+async def help_cmd(interaction: nextcord.Interaction):
+    embed = nextcord.Embed(title="🪙 LTC Bot — Help",
+        description="Litecoin transaction monitor, watcher & invoice bot.",
+        color=C_LTC, timestamp=datetime.now(timezone.utc))
+    embed.set_author(name="LTC Bot", icon_url=LTC_ICON)
+    embed.add_field(name="🔍 Transactions", value=(
         "`/checktx <txid>` — Look up any LTC transaction\n"
-        "`/watch <address>` — Auto-watch an address for new TXs\n"
-        "`/unwatch <address>` — Stop watching an address\n"
-        "`/watchlist` — See all watched addresses & TXs"
-    ), inline=False)
-    embed.add_field(name="🧾 Invoice Commands", value=(
-        "`/invoice <address> <amount> [desc]` — Create a payment invoice with QR\n"
-        "`/invoicestatus <id>` — Check invoice payment status"
-    ), inline=False)
-    embed.add_field(name="📡 Network Commands", value="`/ltcstats` — Show live Litecoin network stats", inline=False)
-    embed.add_field(name="🔔 Auto-Notifications", value=(
-        f"You'll receive DMs at **1, 3, and {REQUIRED_CONFS} confirmations**\n"
-        f"All watched addresses are polled every **{POLL_INTERVAL} seconds**"
-    ), inline=False)
-    embed.set_footer(text="Powered by Sochain API • No API key required")
-    await ctx.respond(embed=embed)
+        "`/watch <addr>` — Watch address for new TXs\n"
+        "`/unwatch <addr>` — Stop watching\n"
+        "`/watchlist` — View all watched addresses & TXs"), inline=False)
+    embed.add_field(name="🧾 Invoices", value=(
+        "`/invoice <addr> <amount> [desc]` — Create invoice + QR code\n"
+        "`/invoicestatus <id>` — Check invoice status"), inline=False)
+    embed.add_field(name="📡 Network", value="`/ltcstats` — Live Litecoin network stats", inline=False)
+    embed.add_field(name="🔔 Auto Notifications", value=(
+        f"DM alerts on new incoming TXs\n"
+        f"Confirmation DMs at **1 → 3 → {REQUIRED_CONFS}** confs\n"
+        f"Polls every **{POLL_INTERVAL}s**"), inline=False)
+    embed.set_footer(text="Powered by Sochain API • No API key needed")
+    await interaction.response.send_message(embed=embed)
 
 
-# ─────────────────────────────────────────────────────────
-# BOT EVENTS
-# ─────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# EVENTS
+# ──────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} ({bot.user.id})")
-    poll_addresses.start()
-    poll_txids.start()
-
+    print(f"✅  {bot.user}  (ID: {bot.user.id})")
+    print(f"🔄  Polling every {POLL_INTERVAL}s | Confs required: {REQUIRED_CONFS}")
+    if not poll_addresses.is_running():
+        poll_addresses.start()
+    if not poll_txids.is_running():
+        poll_txids.start()
     if WATCH_ADDRESS:
-        data = await get_address_txs(WATCH_ADDRESS)
-        last_hash = None
-        if data:
-            txrefs = data.get("txrefs", [])
-            if txrefs:
-                last_hash = txrefs[0].get("tx_hash")
-        watched_addresses[WATCH_ADDRESS] = {"channel_id": None, "last_tx_hash": last_hash}
-        print(f"👁️ Auto-watching address: {WATCH_ADDRESS}")
-
-    print(f"✅ Bot ready | Polling every {POLL_INTERVAL}s | Required confirmations: {REQUIRED_CONFS}")
+        last = await fetch_latest_tx_hash(WATCH_ADDRESS)
+        watched_addresses[WATCH_ADDRESS] = {"channel_id": None, "last_tx_hash": last}
+        print(f"👁️  Auto-watching: {WATCH_ADDRESS}")
 
 
 bot.run(BOT_TOKEN)
