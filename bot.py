@@ -1,16 +1,14 @@
 """
-LTC Discord Bot • Python 3.13 • hikari + hikari-lightbulb
-No audioop dependency. Works on Python 3.13 out of the box.
+LTC Discord Bot  •  Python 3.13  •  hikari 2.5.0
+Pure hikari — zero audioop dependency, works on Python 3.13.
+Sochain API — no key needed.
 """
 
-import os
-import io
-import asyncio
+import os, io, asyncio
 from datetime import datetime, timezone
 
 import aiohttp
 import hikari
-import lightbulb
 import qrcode
 
 # ──────────────────────────────────────────────────────────────
@@ -24,7 +22,6 @@ REQUIRED_CONFS = int(os.environ.get("REQUIRED_CONFS", "6"))
 
 SOCHAIN  = "https://sochain.com/api/v3"
 LTC_ICON = "https://cryptologos.cc/logos/litecoin-ltc-logo.png"
-
 C_LTC    = 0x345D9D
 C_GREEN  = 0x2ECC71
 C_RED    = 0xE74C3C
@@ -35,13 +32,11 @@ C_GREY   = 0x95A5A6
 # BOT
 # ──────────────────────────────────────────────────────────────
 bot = hikari.GatewayBot(token=BOT_TOKEN)
-cli = lightbulb.client_from_app(bot)
 
 watched_addresses: dict = {}
 watched_txids:     dict = {}
 invoices:          dict = {}
 invoice_seq              = 0
-
 
 # ──────────────────────────────────────────────────────────────
 # SOCHAIN API
@@ -56,7 +51,6 @@ async def api_get(url: str) -> dict | None:
     except Exception as e:
         print(f"[API] {e}")
     return None
-
 
 async def fetch_tx(txid: str) -> dict | None:
     raw = await api_get(f"{SOCHAIN}/transaction/LTC/{txid}")
@@ -77,7 +71,6 @@ async def fetch_tx(txid: str) -> dict | None:
         "outputs":       outputs,
     }
 
-
 async def fetch_latest_tx_hash(address: str) -> str | None:
     raw = await api_get(f"{SOCHAIN}/transactions/LTC/{address}/1")
     if raw:
@@ -86,17 +79,15 @@ async def fetch_latest_tx_hash(address: str) -> str | None:
             return txs[0].get("hash") or txs[0].get("txid")
     return None
 
-
 async def fetch_network() -> dict | None:
     return await api_get(f"{SOCHAIN}/info/LTC")
-
 
 # ──────────────────────────────────────────────────────────────
 # UTILS
 # ──────────────────────────────────────────────────────────────
-def conf_bar(confs: int) -> str:
-    f = min(confs, REQUIRED_CONFS)
-    return f"`{'█'*f}{'░'*(REQUIRED_CONFS-f)}` {confs}/{REQUIRED_CONFS}"
+def conf_bar(c: int) -> str:
+    f = min(c, REQUIRED_CONFS)
+    return f"`{'█'*f}{'░'*(REQUIRED_CONFS-f)}` {c}/{REQUIRED_CONFS}"
 
 def conf_color(c: int) -> int:
     return C_ORANGE if c == 0 else (C_GREEN if c >= REQUIRED_CONFS else C_LTC)
@@ -117,11 +108,9 @@ def make_qr(address: str, amount: float) -> bytes:
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=10, border=4)
     qr.add_data(f"litecoin:{address}?amount={amount}")
     qr.make(fit=True)
-    img = qr.make_image(fill_color="#345D9D", back_color="white")
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    qr.make_image(fill_color="#345D9D", back_color="white").save(buf, format="PNG")
     return buf.getvalue()
-
 
 # ──────────────────────────────────────────────────────────────
 # EMBED BUILDERS
@@ -129,14 +118,12 @@ def make_qr(address: str, amount: float) -> bytes:
 def tx_embed(tx: dict, title: str = "🔍 Transaction Details") -> hikari.Embed:
     confs = tx["confirmations"]
     txid  = tx["hash"]
-
     senders = []
     for i in tx["inputs"][:3]:
         senders += i["addresses"]
     sender_str = "\n".join(f"`{a}`" for a in senders[:3]) or "Coinbase / Unknown"
     if len(tx["inputs"]) > 3:
         sender_str += f"\n*+{len(tx['inputs'])-3} more*"
-
     recv_lines = []
     for o in tx["outputs"][:3]:
         for addr in o["addresses"]:
@@ -144,34 +131,26 @@ def tx_embed(tx: dict, title: str = "🔍 Transaction Details") -> hikari.Embed:
     receiver_str = "\n".join(recv_lines[:3]) or "Unknown"
     if len(tx["outputs"]) > 3:
         receiver_str += f"\n*+{len(tx['outputs'])-3} more*"
-
-    embed = (
+    return (
         hikari.Embed(title=title, url=f"https://sochain.com/tx/LTC/{txid}",
                      color=conf_color(confs), timestamp=datetime.now(timezone.utc))
         .set_author(name="Litecoin Network", icon=LTC_ICON)
-        .add_field("🆔 TXID",    f"```{txid}```",                             inline=False)
-        .add_field("💰 Amount",  f"**{tx['total_ltc']:.8f} LTC**",            inline=True)
-        .add_field("⛽ Fee",     f"{tx['fee_ltc']:.8f} LTC",                  inline=True)
-        .add_field("📦 Size",    f"{tx['size']} bytes",                       inline=True)
-        .add_field("📊 Status",  f"{status_label(confs)}\n{conf_bar(confs)}", inline=False)
-        .add_field("📤 From",    sender_str,                                  inline=True)
-        .add_field("📥 To",      receiver_str,                                inline=True)
-        .add_field("🕐 Time",    fmt_time(tx["time"]),                        inline=False)
-        .set_footer(text="Sochain Explorer", icon=LTC_ICON)
+        .add_field("🆔 TXID",   f"```{txid}```",                             inline=False)
+        .add_field("💰 Amount", f"**{tx['total_ltc']:.8f} LTC**",            inline=True)
+        .add_field("⛽ Fee",    f"{tx['fee_ltc']:.8f} LTC",                  inline=True)
+        .add_field("📦 Size",   f"{tx['size']} bytes",                       inline=True)
+        .add_field("📊 Status", f"{status_label(confs)}\n{conf_bar(confs)}", inline=False)
+        .add_field("📤 From",   sender_str,                                  inline=True)
+        .add_field("📥 To",     receiver_str,                                inline=True)
+        .add_field("🕐 Time",   fmt_time(tx["time"]),                        inline=False)
+        .set_footer(text="View on Sochain", icon=LTC_ICON)
     )
-    return embed
-
 
 def invoice_embed(inv: dict) -> hikari.Embed:
-    labels = {
-        "pending": ("⏳ Awaiting Payment", C_ORANGE),
-        "paid":    ("✅ Paid",              C_GREEN),
-        "expired": ("❌ Expired",           C_RED),
-    }
+    labels = {"pending": ("⏳ Awaiting Payment", C_ORANGE), "paid": ("✅ Paid", C_GREEN), "expired": ("❌ Expired", C_RED)}
     label, color = labels.get(inv["status"], ("❓ Unknown", C_GREY))
-    embed = (
-        hikari.Embed(title=f"🧾 Invoice #{inv['id']}",
-                     description=f"**{inv.get('description','Litecoin Payment')}**",
+    e = (
+        hikari.Embed(title=f"🧾 Invoice #{inv['id']}", description=f"**{inv.get('description','Litecoin Payment')}**",
                      color=color, timestamp=datetime.now(timezone.utc))
         .set_author(name="Litecoin Invoice", icon=LTC_ICON)
         .add_field("💎 Amount", f"**{inv['amount']} LTC**", inline=True)
@@ -179,190 +158,233 @@ def invoice_embed(inv: dict) -> hikari.Embed:
         .add_field("🔢 ID",     f"`#{inv['id']}`",          inline=True)
         .add_field("📬 Pay To", f"```{inv['address']}```",  inline=False)
         .add_field("📋 Instructions",
-                   f"Send exactly **{inv['amount']} LTC** to the address above.\n"
-                   f"The bot will auto-detect your payment.", inline=False)
+                   f"Send exactly **{inv['amount']} LTC** to the address above.\nThe bot will auto-detect your payment.",
+                   inline=False)
         .set_footer(text=f"Created by {inv['creator']}")
     )
     if inv.get("txid"):
-        embed.add_field("🔗 TXID", f"```{inv['txid']}```", inline=False)
-    return embed
-
+        e.add_field("🔗 TXID", f"```{inv['txid']}```", inline=False)
+    return e
 
 # ──────────────────────────────────────────────────────────────
-# DM / NOTIFY HELPERS
+# HELPERS
 # ──────────────────────────────────────────────────────────────
 async def dm_user(user_id: int, embed: hikari.Embed, attachment: bytes | None = None):
     if not user_id:
         return
     try:
         dm = await bot.rest.create_dm_channel(user_id)
+        kwargs: dict = {"embed": embed}
         if attachment:
-            await bot.rest.create_message(dm.id, embed=embed,
-                                          attachment=hikari.Bytes(attachment, "qr.png"))
-        else:
-            await bot.rest.create_message(dm.id, embed=embed)
+            kwargs["attachment"] = hikari.Bytes(attachment, "qr.png")
+        await bot.rest.create_message(dm.id, **kwargs)
     except Exception as e:
-        print(f"[DM] {user_id}: {e}")
-
+        print(f"[DM] {e}")
 
 async def notify(embed: hikari.Embed, channel_id: int | None, user_id: int | None):
     if channel_id:
         try:
             await bot.rest.create_message(channel_id, embed=embed)
         except Exception as e:
-            print(f"[Notify channel] {e}")
+            print(f"[Notify] {e}")
     if user_id:
         await dm_user(user_id, embed)
 
+async def defer_and_respond(interaction: hikari.CommandInteraction, embed: hikari.Embed,
+                            attachment: bytes | None = None, ephemeral: bool = False):
+    flags = hikari.MessageFlag.EPHEMERAL if ephemeral else hikari.MessageFlag.NONE
+    await interaction.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE, flags=flags)
+    kwargs: dict = {"embed": embed}
+    if attachment:
+        kwargs["attachment"] = hikari.Bytes(attachment, "qr.png")
+    await interaction.edit_initial_response(**kwargs)
 
 # ──────────────────────────────────────────────────────────────
-# BACKGROUND POLLING
+# POLLING
 # ──────────────────────────────────────────────────────────────
 async def poll_loop():
-    await bot.wait_for(hikari.StartedEvent, timeout=None)
-    print("🔄 Polling started")
     while True:
         await asyncio.sleep(POLL_INTERVAL)
-        await _poll_addresses()
-        await _poll_txids()
+        # Poll addresses
+        for address, state in list(watched_addresses.items()):
+            try:
+                latest = await fetch_latest_tx_hash(address)
+                if not latest or state.get("last_tx_hash") == latest:
+                    continue
+                watched_addresses[address]["last_tx_hash"] = latest
+                tx = await fetch_tx(latest)
+                if not tx:
+                    continue
+                embed = tx_embed(tx, "🚨 New Incoming Transaction!")
+                embed.color = C_ORANGE
+                embed.add_field("📍 Watched Address", f"`{address}`", inline=False)
+                await notify(embed, state.get("channel_id"), NOTIFY_USER_ID)
+                if latest not in watched_txids:
+                    watched_txids[latest] = {
+                        "channel_id": state.get("channel_id"), "user_id": NOTIFY_USER_ID,
+                        "last_confs": tx["confirmations"], "done": tx["confirmations"] >= REQUIRED_CONFS,
+                    }
+            except Exception as e:
+                print(f"[Poll Addr] {address}: {e}")
 
-
-async def _poll_addresses():
-    for address, state in list(watched_addresses.items()):
-        try:
-            latest = await fetch_latest_tx_hash(address)
-            if not latest or state.get("last_tx_hash") == latest:
+        # Poll txids
+        for txid, state in list(watched_txids.items()):
+            if state.get("done"):
                 continue
-            watched_addresses[address]["last_tx_hash"] = latest
-            tx = await fetch_tx(latest)
-            if not tx:
-                continue
-            embed = tx_embed(tx, title="🚨 New Incoming Transaction!")
-            embed.color = C_ORANGE
-            embed.add_field("📍 Watched Address", f"`{address}`", inline=False)
-            await notify(embed, state.get("channel_id"), NOTIFY_USER_ID)
-            if latest not in watched_txids:
-                watched_txids[latest] = {
-                    "channel_id": state.get("channel_id"),
-                    "user_id":    NOTIFY_USER_ID,
-                    "last_confs": tx["confirmations"],
-                    "done":       tx["confirmations"] >= REQUIRED_CONFS,
-                }
-        except Exception as e:
-            print(f"[Poll Addr] {address}: {e}")
-
-
-async def _poll_txids():
-    for txid, state in list(watched_txids.items()):
-        if state.get("done"):
-            continue
-        try:
-            tx = await fetch_tx(txid)
-            if not tx:
-                continue
-            confs = tx["confirmations"]
-            prev  = state["last_confs"]
-            watched_txids[txid]["last_confs"] = confs
-            for milestone in [1, 3, REQUIRED_CONFS]:
-                if prev < milestone <= confs:
-                    if confs >= REQUIRED_CONFS:
-                        embed = (
-                            hikari.Embed(
-                                title="🔒 Transaction Fully Confirmed!",
-                                description=f"Reached **{confs} confirmations** — fully settled on Litecoin.",
-                                url=f"https://sochain.com/tx/LTC/{txid}",
-                                color=C_GREEN, timestamp=datetime.now(timezone.utc))
-                            .set_author(name="Litecoin Network", icon=LTC_ICON)
-                            .add_field("🆔 TXID",          f"```{txid}```", inline=False)
-                            .add_field("📊 Confirmations", conf_bar(confs), inline=False)
-                        )
-                        watched_txids[txid]["done"] = True
-                    else:
-                        embed = tx_embed(tx, title=f"🔄 {confs} Confirmation{'s' if confs!=1 else ''}")
-                    await notify(embed, state.get("channel_id"), state.get("user_id"))
-                    break
-        except Exception as e:
-            print(f"[Poll TX] {txid[:16]}: {e}")
-
+            try:
+                tx = await fetch_tx(txid)
+                if not tx:
+                    continue
+                confs = tx["confirmations"]
+                prev  = state["last_confs"]
+                watched_txids[txid]["last_confs"] = confs
+                for milestone in [1, 3, REQUIRED_CONFS]:
+                    if prev < milestone <= confs:
+                        if confs >= REQUIRED_CONFS:
+                            embed = (
+                                hikari.Embed(title="🔒 Transaction Fully Confirmed!",
+                                             description=f"Reached **{confs} confirmations** — fully settled.",
+                                             url=f"https://sochain.com/tx/LTC/{txid}",
+                                             color=C_GREEN, timestamp=datetime.now(timezone.utc))
+                                .set_author(name="Litecoin Network", icon=LTC_ICON)
+                                .add_field("🆔 TXID",          f"```{txid}```", inline=False)
+                                .add_field("📊 Confirmations", conf_bar(confs), inline=False)
+                            )
+                            watched_txids[txid]["done"] = True
+                        else:
+                            embed = tx_embed(tx, f"🔄 {confs} Confirmation{'s' if confs!=1 else ''}")
+                        await notify(embed, state.get("channel_id"), state.get("user_id"))
+                        break
+            except Exception as e:
+                print(f"[Poll TX] {txid[:16]}: {e}")
 
 # ──────────────────────────────────────────────────────────────
-# SLASH COMMANDS
+# REGISTER SLASH COMMANDS ON STARTUP
 # ──────────────────────────────────────────────────────────────
-@cli.register
-class CheckTx(lightbulb.SlashCommand, name="checktx", description="Look up a Litecoin transaction by TXID"):
-    txid: str = lightbulb.string("txid", "64-character hex transaction ID")
+@bot.listen(hikari.StartingEvent)
+async def on_starting(event: hikari.StartingEvent) -> None:
+    app = await bot.rest.fetch_application()
+    await bot.rest.set_application_commands(
+        application=app.id,
+        commands=[
+            bot.rest.slash_command_builder("checktx", "Look up a Litecoin transaction by TXID")
+                .add_option(hikari.CommandOption(
+                    type=hikari.OptionType.STRING, name="txid",
+                    description="64-character hex transaction ID", is_required=True)),
 
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
-        await ctx.respond(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
-        txid = self.txid.strip().lower()
+            bot.rest.slash_command_builder("watch", "Watch a Litecoin address for new incoming transactions")
+                .add_option(hikari.CommandOption(
+                    type=hikari.OptionType.STRING, name="address",
+                    description="LTC address (starts with L, M or ltc1)", is_required=True)),
+
+            bot.rest.slash_command_builder("unwatch", "Stop watching a Litecoin address")
+                .add_option(hikari.CommandOption(
+                    type=hikari.OptionType.STRING, name="address",
+                    description="LTC address to stop monitoring", is_required=True)),
+
+            bot.rest.slash_command_builder("watchlist", "Show all watched addresses and transactions"),
+
+            bot.rest.slash_command_builder("invoice", "Create a Litecoin payment invoice with QR code")
+                .add_option(hikari.CommandOption(
+                    type=hikari.OptionType.STRING, name="address",
+                    description="Your LTC receiving address", is_required=True))
+                .add_option(hikari.CommandOption(
+                    type=hikari.OptionType.NUMBER, name="amount",
+                    description="Amount in LTC", is_required=True))
+                .add_option(hikari.CommandOption(
+                    type=hikari.OptionType.STRING, name="description",
+                    description="What the payment is for", is_required=False)),
+
+            bot.rest.slash_command_builder("invoicestatus", "Check the status of an invoice")
+                .add_option(hikari.CommandOption(
+                    type=hikari.OptionType.STRING, name="invoice_id",
+                    description="Invoice ID e.g. 0001", is_required=True)),
+
+            bot.rest.slash_command_builder("ltcstats", "Show live Litecoin network stats"),
+            bot.rest.slash_command_builder("help", "Show all bot commands"),
+        ],
+    )
+    print("✅ Slash commands registered")
+
+# ──────────────────────────────────────────────────────────────
+# INTERACTION HANDLER
+# ──────────────────────────────────────────────────────────────
+def get_option(interaction: hikari.CommandInteraction, name: str):
+    for opt in (interaction.options or []):
+        if opt.name == name:
+            return opt.value
+    return None
+
+@bot.listen(hikari.InteractionCreateEvent)
+async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
+    if not isinstance(event.interaction, hikari.CommandInteraction):
+        return
+    interaction = event.interaction
+    cmd = interaction.command_name
+    global invoice_seq
+
+    # ── /checktx ──────────────────────────────────────────────
+    if cmd == "checktx":
+        txid = str(get_option(interaction, "txid") or "").strip().lower()
+        await interaction.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
         if len(txid) != 64 or not all(c in "0123456789abcdef" for c in txid):
-            embed = hikari.Embed(title="❌ Invalid TXID", description="Must be a 64-character hex string.", color=C_RED)
-            await ctx.respond(embed)
+            await interaction.edit_initial_response(embed=hikari.Embed(
+                title="❌ Invalid TXID", description="Must be a 64-character hex string.", color=C_RED))
             return
         tx = await fetch_tx(txid)
         if not tx:
-            embed = hikari.Embed(title="❌ Not Found", description=f"No transaction found for:\n```{txid}```", color=C_RED)
-            await ctx.respond(embed)
+            await interaction.edit_initial_response(embed=hikari.Embed(
+                title="❌ Not Found", description=f"No transaction found for:\n```{txid}```", color=C_RED))
             return
         embed = tx_embed(tx)
         if tx["confirmations"] < REQUIRED_CONFS:
-            watched_txids[txid] = {
-                "channel_id": ctx.channel_id,
-                "user_id":    ctx.user.id,
-                "last_confs": tx["confirmations"],
-                "done":       False,
-            }
+            watched_txids[txid] = {"channel_id": interaction.channel_id, "user_id": interaction.user.id,
+                                   "last_confs": tx["confirmations"], "done": False}
             embed.set_footer(text=f"👁️ Watching — DM at 1, 3 & {REQUIRED_CONFS} confs | Sochain")
-        await ctx.respond(embed)
-        await dm_user(ctx.user.id, embed)
+        await interaction.edit_initial_response(embed=embed)
+        await dm_user(interaction.user.id, embed)
 
-
-@cli.register
-class Watch(lightbulb.SlashCommand, name="watch", description="Watch a Litecoin address for incoming transactions"):
-    address: str = lightbulb.string("address", "LTC address (starts with L, M or ltc1)")
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
-        address = self.address.strip()
+    # ── /watch ────────────────────────────────────────────────
+    elif cmd == "watch":
+        address = str(get_option(interaction, "address") or "").strip()
         if not (address.startswith(("L", "M", "ltc1")) and 26 <= len(address) <= 62):
-            embed = hikari.Embed(title="❌ Invalid Address", description="Please provide a valid Litecoin address.", color=C_RED)
-            await ctx.respond(embed, flags=hikari.MessageFlag.EPHEMERAL)
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE,
+                embed=hikari.Embed(title="❌ Invalid Address",
+                                   description="Please provide a valid Litecoin address.", color=C_RED),
+                flags=hikari.MessageFlag.EPHEMERAL)
             return
         last = await fetch_latest_tx_hash(address)
-        watched_addresses[address] = {"channel_id": ctx.channel_id, "last_tx_hash": last}
+        watched_addresses[address] = {"channel_id": interaction.channel_id, "last_tx_hash": last}
         embed = (
             hikari.Embed(title="👁️ Now Watching", color=C_LTC, timestamp=datetime.now(timezone.utc))
             .set_author(name="Litecoin Monitor", icon=LTC_ICON)
-            .add_field("📬 Address",       f"```{address}```",                                    inline=False)
+            .add_field("📬 Address",       f"```{address}```",                                       inline=False)
             .add_field("🔔 Notifications", f"DM on new TX\nConf updates: 1 → 3 → {REQUIRED_CONFS}", inline=False)
             .set_footer(text=f"Polling every {POLL_INTERVAL}s • Sochain API")
         )
-        await ctx.respond(embed, flags=hikari.MessageFlag.EPHEMERAL)
+        await interaction.create_initial_response(
+            hikari.ResponseType.MESSAGE_CREATE, embed=embed, flags=hikari.MessageFlag.EPHEMERAL)
 
-
-@cli.register
-class Unwatch(lightbulb.SlashCommand, name="unwatch", description="Stop watching a Litecoin address"):
-    address: str = lightbulb.string("address", "LTC address to stop monitoring")
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
-        address = self.address.strip()
+    # ── /unwatch ──────────────────────────────────────────────
+    elif cmd == "unwatch":
+        address = str(get_option(interaction, "address") or "").strip()
         if address in watched_addresses:
             del watched_addresses[address]
             embed = hikari.Embed(title="🛑 Stopped Watching", description=f"`{address}`", color=C_GREY)
         else:
             embed = hikari.Embed(title="❓ Not Watching", description=f"`{address}` was not being watched.", color=C_RED)
-        await ctx.respond(embed, flags=hikari.MessageFlag.EPHEMERAL)
+        await interaction.create_initial_response(
+            hikari.ResponseType.MESSAGE_CREATE, embed=embed, flags=hikari.MessageFlag.EPHEMERAL)
 
-
-@cli.register
-class Watchlist(lightbulb.SlashCommand, name="watchlist", description="Show all watched addresses and transactions"):
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
+    # ── /watchlist ────────────────────────────────────────────
+    elif cmd == "watchlist":
         if not watched_addresses and not watched_txids:
-            embed = hikari.Embed(title="📭 Watch List Empty", description="Use `/watch <address>` to start.", color=C_GREY)
-            await ctx.respond(embed, flags=hikari.MessageFlag.EPHEMERAL)
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE,
+                embed=hikari.Embed(title="📭 Watch List Empty",
+                                   description="Use `/watch <address>` to start.", color=C_GREY),
+                flags=hikari.MessageFlag.EPHEMERAL)
             return
         embed = hikari.Embed(title="👁️ Watch List", color=C_LTC, timestamp=datetime.now(timezone.utc))
         if watched_addresses:
@@ -371,68 +393,52 @@ class Watchlist(lightbulb.SlashCommand, name="watchlist", description="Show all 
         active = {k: v for k, v in watched_txids.items() if not v.get("done")}
         if active:
             embed.add_field(f"🔗 Active TXs ({len(active)})",
-                            "\n".join(f"• `{t[:20]}…` — {s['last_confs']} conf(s)" for t, s in list(active.items())[:10]),
-                            inline=False)
-        await ctx.respond(embed, flags=hikari.MessageFlag.EPHEMERAL)
+                            "\n".join(f"• `{t[:20]}…` — {s['last_confs']} conf(s)"
+                                      for t, s in list(active.items())[:10]), inline=False)
+        await interaction.create_initial_response(
+            hikari.ResponseType.MESSAGE_CREATE, embed=embed, flags=hikari.MessageFlag.EPHEMERAL)
 
-
-@cli.register
-class Invoice(lightbulb.SlashCommand, name="invoice", description="Create a Litecoin payment invoice with QR code"):
-    address:     str   = lightbulb.string("address",     "Your LTC receiving address")
-    amount:      float = lightbulb.number("amount",      "Amount in LTC")
-    description: str   = lightbulb.string("description", "What the payment is for", default="Litecoin Payment")
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
-        global invoice_seq
-        await ctx.respond(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
-        if self.amount <= 0:
-            await ctx.respond("❌ Amount must be greater than 0.")
+    # ── /invoice ──────────────────────────────────────────────
+    elif cmd == "invoice":
+        await interaction.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
+        address     = str(get_option(interaction, "address") or "").strip()
+        amount      = float(get_option(interaction, "amount") or 0)
+        description = str(get_option(interaction, "description") or "Litecoin Payment")
+        if amount <= 0:
+            await interaction.edit_initial_response("❌ Amount must be greater than 0.")
             return
         invoice_seq += 1
-        inv = {
-            "id":          f"{invoice_seq:04d}",
-            "address":     self.address.strip(),
-            "amount":      round(self.amount, 8),
-            "description": self.description,
-            "status":      "pending",
-            "txid":        None,
-            "creator":     str(ctx.user),
-            "channel_id":  ctx.channel_id,
-            "user_id":     ctx.user.id,
-        }
+        inv = {"id": f"{invoice_seq:04d}", "address": address, "amount": round(amount, 8),
+               "description": description, "status": "pending", "txid": None,
+               "creator": str(interaction.user), "channel_id": interaction.channel_id,
+               "user_id": interaction.user.id}
         invoices[inv["id"]] = inv
-        if self.address not in watched_addresses:
-            last = await fetch_latest_tx_hash(self.address)
-            watched_addresses[self.address] = {"channel_id": ctx.channel_id, "last_tx_hash": last}
-        embed = invoice_embed(inv)
-        qr_bytes = make_qr(self.address, self.amount)
-        await ctx.respond(embed, attachment=hikari.Bytes(qr_bytes, "qr.png"))
-        await dm_user(ctx.user.id, invoice_embed(inv), qr_bytes)
+        if address not in watched_addresses:
+            last = await fetch_latest_tx_hash(address)
+            watched_addresses[address] = {"channel_id": interaction.channel_id, "last_tx_hash": last}
+        qr_bytes = make_qr(address, amount)
+        await interaction.edit_initial_response(
+            embed=invoice_embed(inv), attachment=hikari.Bytes(qr_bytes, "qr.png"))
+        await dm_user(interaction.user.id, invoice_embed(inv), qr_bytes)
 
-
-@cli.register
-class InvoiceStatus(lightbulb.SlashCommand, name="invoicestatus", description="Check the status of an invoice"):
-    invoice_id: str = lightbulb.string("invoice_id", "Invoice ID e.g. 0001")
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
-        inv = invoices.get(self.invoice_id.zfill(4))
+    # ── /invoicestatus ────────────────────────────────────────
+    elif cmd == "invoicestatus":
+        inv_id = str(get_option(interaction, "invoice_id") or "").zfill(4)
+        inv    = invoices.get(inv_id)
         if not inv:
-            embed = hikari.Embed(title="❌ Not Found", description=f"No invoice `{self.invoice_id}`.", color=C_RED)
-            await ctx.respond(embed, flags=hikari.MessageFlag.EPHEMERAL)
+            await interaction.create_initial_response(
+                hikari.ResponseType.MESSAGE_CREATE,
+                embed=hikari.Embed(title="❌ Not Found", description=f"No invoice `{inv_id}`.", color=C_RED),
+                flags=hikari.MessageFlag.EPHEMERAL)
             return
-        await ctx.respond(invoice_embed(inv))
+        await interaction.create_initial_response(hikari.ResponseType.MESSAGE_CREATE, embed=invoice_embed(inv))
 
-
-@cli.register
-class LtcStats(lightbulb.SlashCommand, name="ltcstats", description="Show live Litecoin network stats"):
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
-        await ctx.respond(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
+    # ── /ltcstats ─────────────────────────────────────────────
+    elif cmd == "ltcstats":
+        await interaction.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
         data = await fetch_network()
         if not data:
-            await ctx.respond("❌ Could not reach Sochain API.")
+            await interaction.edit_initial_response("❌ Could not reach Sochain API.")
             return
         embed = hikari.Embed(title="⛏️ Litecoin Network Stats", color=C_LTC, timestamp=datetime.now(timezone.utc))
         embed.set_author(name="Litecoin Network", icon=LTC_ICON)
@@ -443,17 +449,14 @@ class LtcStats(lightbulb.SlashCommand, name="ltcstats", description="Show live L
             embed.add_field("⛏️ Difficulty",  f"`{float(data.get('difficulty',0)):,.0f}`",                  inline=True)
         except Exception:
             embed.add_field("⛏️ Difficulty",  f"`{data.get('difficulty','N/A')}`",                          inline=True)
-        embed.add_field("💵 Price",           f"`${data.get('price','N/A')} USD`",     inline=True)
-        embed.add_field("⏱️ Unconfirmed TXs", f"`{data.get('unconfirmed_txs','N/A')}`", inline=True)
-        embed.add_field("🔗 Hashrate",        f"`{data.get('hashrate','N/A')}`",        inline=True)
+        embed.add_field("💵 Price",           f"`${data.get('price','N/A')} USD`",       inline=True)
+        embed.add_field("⏱️ Unconfirmed TXs", f"`{data.get('unconfirmed_txs','N/A')}`",  inline=True)
+        embed.add_field("🔗 Hashrate",        f"`{data.get('hashrate','N/A')}`",          inline=True)
         embed.set_footer(text="Sochain API • No key required")
-        await ctx.respond(embed)
+        await interaction.edit_initial_response(embed=embed)
 
-
-@cli.register
-class Help(lightbulb.SlashCommand, name="help", description="Show all bot commands"):
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context) -> None:
+    # ── /help ─────────────────────────────────────────────────
+    elif cmd == "help":
         embed = (
             hikari.Embed(title="🪙 LTC Bot — Help",
                          description="Litecoin transaction monitor, watcher & invoice bot.",
@@ -474,21 +477,18 @@ class Help(lightbulb.SlashCommand, name="help", description="Show all bot comman
                 f"Polls every **{POLL_INTERVAL}s**"), inline=False)
             .set_footer(text="Powered by Sochain API • No API key needed")
         )
-        await ctx.respond(embed)
-
+        await interaction.create_initial_response(hikari.ResponseType.MESSAGE_CREATE, embed=embed)
 
 # ──────────────────────────────────────────────────────────────
-# STARTUP
+# STARTED EVENT
 # ──────────────────────────────────────────────────────────────
 @bot.listen(hikari.StartedEvent)
 async def on_started(event: hikari.StartedEvent) -> None:
-    print(f"✅ Bot started | Polling every {POLL_INTERVAL}s | Required confs: {REQUIRED_CONFS}")
+    print(f"✅ Bot online | Polling every {POLL_INTERVAL}s | Confs required: {REQUIRED_CONFS}")
     if WATCH_ADDRESS:
         last = await fetch_latest_tx_hash(WATCH_ADDRESS)
         watched_addresses[WATCH_ADDRESS] = {"channel_id": None, "last_tx_hash": last}
         print(f"👁️ Auto-watching: {WATCH_ADDRESS}")
     asyncio.create_task(poll_loop())
 
-
-if __name__ == "__main__":
-    bot.run()
+bot.run()
