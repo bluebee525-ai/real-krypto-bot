@@ -4,7 +4,7 @@ Pure hikari — zero audioop dependency, works on Python 3.13.
 Sochain API — no key needed.
 """
 
-import os, io, asyncio
+import os, io, asyncio, traceback
 from datetime import datetime, timezone
 
 import aiohttp
@@ -31,7 +31,17 @@ C_GREY   = 0x95A5A6
 # ──────────────────────────────────────────────────────────────
 # BOT
 # ──────────────────────────────────────────────────────────────
-bot = hikari.GatewayBot(token=BOT_TOKEN)
+bot = hikari.GatewayBot(
+    token=BOT_TOKEN,
+    intents=(
+        hikari.Intents.GUILDS
+        | hikari.Intents.GUILD_MESSAGES
+        | hikari.Intents.DM_MESSAGES
+        | hikari.Intents.MESSAGE_CONTENT
+        | hikari.Intents.GUILD_MEMBERS
+    ),
+    logs="DEBUG",
+)
 
 watched_addresses: dict = {}
 watched_txids:     dict = {}
@@ -171,15 +181,19 @@ def invoice_embed(inv: dict) -> hikari.Embed:
 # ──────────────────────────────────────────────────────────────
 async def dm_user(user_id: int, embed: hikari.Embed, attachment: bytes | None = None):
     if not user_id:
+        print("[DM] NOTIFY_USER_ID is 0 — set it in Railway Variables!")
         return
     try:
+        print(f"[DM] Sending DM to user {user_id}...")
         dm = await bot.rest.create_dm_channel(user_id)
         kwargs: dict = {"embed": embed}
         if attachment:
             kwargs["attachment"] = hikari.Bytes(attachment, "qr.png")
         await bot.rest.create_message(dm.id, **kwargs)
+        print(f"[DM] ✅ DM sent to {user_id}")
     except Exception as e:
-        print(f"[DM] {e}")
+        print(f"[DM] ❌ Failed to DM {user_id}: {e}")
+        traceback.print_exc()
 
 async def notify(embed: hikari.Embed, channel_id: int | None, user_id: int | None):
     if channel_id:
@@ -485,6 +499,10 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
 @bot.listen(hikari.StartedEvent)
 async def on_started(event: hikari.StartedEvent) -> None:
     print(f"✅ Bot online | Polling every {POLL_INTERVAL}s | Confs required: {REQUIRED_CONFS}")
+    print(f"🔔 NOTIFY_USER_ID = {NOTIFY_USER_ID}")
+    print(f"📬 WATCH_ADDRESS  = {WATCH_ADDRESS or 'NOT SET'}")
+    if not NOTIFY_USER_ID:
+        print("⚠️  WARNING: NOTIFY_USER_ID is not set — DMs will not be sent!")
     if WATCH_ADDRESS:
         last = await fetch_latest_tx_hash(WATCH_ADDRESS)
         watched_addresses[WATCH_ADDRESS] = {"channel_id": None, "last_tx_hash": last}
