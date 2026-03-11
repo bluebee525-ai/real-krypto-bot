@@ -26,7 +26,8 @@ WATCH_ADDRESS  = os.environ.get("LTC_WATCH_ADDRESS", "")
 _raw_ids = os.environ.get("NOTIFY_USER_IDS", os.environ.get("NOTIFY_USER_ID", ""))
 NOTIFY_USER_IDS: list[int] = [int(x.strip()) for x in _raw_ids.split(",") if x.strip().isdigit()]
 
-BLOCKCHAIR = "https://api.blockchair.com/litecoin"
+BLOCKCHAIR  = "https://api.blockchair.com/litecoin"
+BLOCKCYPHER = "https://api.blockcypher.com/v1/ltc/main"
 LTC_ICON   = "https://cryptologos.cc/logos/litecoin-ltc-logo.png"
 C_LTC    = 0x345D9D
 C_GREEN  = 0x2ECC71
@@ -109,39 +110,30 @@ async def fetch_tx(txid: str) -> dict | None:
         "outputs":       out_addrs,
     }
 
-async def fetch_address(address: str) -> dict | None:
-    raw = await api_get(f"{BLOCKCHAIR}/dashboards/address/{address}")
-    if not raw:
-        return None
-    data = raw.get("data", {})
-    if address in data:
-        return data[address]
-    if data:
-        return next(iter(data.values()))
-    return None
-
 async def fetch_address_stats(address: str) -> dict:
-    data = await fetch_address(address)
-    if not data:
+    """Uses BlockCypher — free, no key, no rate limit issues."""
+    raw = await api_get(f"{BLOCKCYPHER}/addrs/{address}/balance")
+    if not raw:
         return {"balance": 0.0, "received": 0.0, "spent": 0.0, "tx_count": 0, "txs": []}
-    addr = data.get("address", {})
-    return {
-        "balance":  addr.get("balance", 0) / 1e8,
-        "received": addr.get("received", 0) / 1e8,
-        "spent":    addr.get("spent", 0) / 1e8,
-        "tx_count": addr.get("transaction_count", 0),
-        "txs":      data.get("transactions", []),
-    }
+    balance  = raw.get("balance", 0) / 1e8
+    received = raw.get("total_received", 0) / 1e8
+    spent    = raw.get("total_sent", 0) / 1e8
+    tx_count = raw.get("n_tx", 0)
+    return {"balance": balance, "received": received, "spent": spent,
+            "tx_count": tx_count, "txs": []}
 
 async def fetch_address_balance(address: str) -> float:
     stats = await fetch_address_stats(address)
     return stats["balance"]
 
 async def fetch_latest_tx_hash(address: str) -> str | None:
-    data = await fetch_address(address)
-    if data:
-        txs = data.get("transactions", [])
-        return txs[0] if txs else None
+    """Get latest TX hash for an address via BlockCypher."""
+    raw = await api_get(f"{BLOCKCYPHER}/addrs/{address}?limit=1&confirmations=0")
+    if not raw:
+        return None
+    txrefs = raw.get("txrefs", []) or raw.get("unconfirmed_txrefs", [])
+    if txrefs:
+        return txrefs[0].get("tx_hash")
     return None
 
 async def fetch_network() -> dict | None:
@@ -455,14 +447,14 @@ async def on_starting(event: hikari.StartingEvent) -> None:
 
         # ── Invoices ──────────────────────────────────────────
         bot.rest.slash_command_builder("invoice", "Create a Litecoin payment invoice with QR code")
-            .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="address",
-                description="Your LTC receiving address (auto-fills from watched wallets if empty)", is_required=False))
             .add_option(hikari.CommandOption(type=hikari.OptionType.FLOAT, name="amount",
                 description="Amount to request", is_required=True))
             .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="currency",
                 description="Currency of the amount", is_required=True,
                 choices=[hikari.CommandChoice(name="LTC", value="ltc"),
                          hikari.CommandChoice(name="USD", value="usd")]))
+            .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="address",
+                description="Your LTC address (auto-fills from watched wallets if empty)", is_required=False))
             .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="description",
                 description="What the payment is for", is_required=False)),
 
@@ -571,8 +563,13 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
         address = str(opt(ix, "address") or "").strip()
         limit   = min(int(opt(ix, "limit") or 5), 10)
         await ix.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
-        stats = await fetch_address_stats(address)
-        txids = stats["txs"][:limit]
+        raw   = await api_get(f"{BLOCKCYPHER}/addrs/{address}?limit={limit}&confirmations=0")
+        txids = []
+        if raw:
+            for ref in (raw.get("txrefs", []) + raw.get("unconfirmed_txrefs", []))[:limit]:
+                h = ref.get("tx_hash")
+                if h and h not in txids:
+                    txids.append(h)
         if not txids:
             await ix.edit_initial_response(embed=hikari.Embed(
                 title="📭 No Transactions", description=f"No transactions found for `{address}`", color=C_GREY))
@@ -672,25 +669,11 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
                 title="❌ No Address", description="Please provide an LTC address.", color=C_RED))
             return
         print(f"[Balance] Fetching {address}...")
-        raw = await api_get(f"{BLOCKCHAIR}/dashboards/address/{address}")
-        print(f"[Balance] Raw response keys: {list(raw.keys()) if raw else 'None'}")
-        if not raw or not raw.get("data"):
-            await ix.edit_initial_response(embed=hikari.Embed(
-                title="❌ Not Found",
-                description=f"Could not fetch data for:\n`{address}`\n\nCheck it's a valid LTC address.",
-                color=C_RED))
-            return
-        data    = raw["data"]
-        entry   = data.get(address) or next(iter(data.values()), None)
-        if not entry:
-            await ix.edit_initial_response(embed=hikari.Embed(
-                title="❌ No Data", description=f"Blockchair returned no data for `{address}`", color=C_RED))
-            return
-        addr    = entry.get("address", {})
-        balance  = addr.get("balance", 0) / 1e8
-        received = addr.get("received", 0) / 1e8
-        spent    = addr.get("spent", 0) / 1e8
-        tx_count = addr.get("transaction_count", 0)
+        stats    = await fetch_address_stats(address)
+        balance  = stats["balance"]
+        received = stats["received"]
+        spent    = stats["spent"]
+        tx_count = stats["tx_count"]
         print(f"[Balance] {address}: {balance} LTC, {tx_count} TXs")
         embed = (
             hikari.Embed(title="💼 Address Balance", color=C_LTC, timestamp=datetime.now(timezone.utc))
