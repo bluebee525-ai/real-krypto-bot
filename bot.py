@@ -677,10 +677,7 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
         if not raw or not raw.get("data"):
             await ix.edit_initial_response(embed=hikari.Embed(
                 title="❌ Not Found",
-                description=f"Could not fetch data for:
-`{address}`
-
-Check it's a valid LTC address.",
+                description=f"Could not fetch data for:\n`{address}`\n\nCheck it's a valid LTC address.",
                 color=C_RED))
             return
         data    = raw["data"]
@@ -806,8 +803,7 @@ Check it's a valid LTC address.",
             else:
                 await ix.edit_initial_response(embed=hikari.Embed(
                     title="❌ No Address",
-                    description="No address provided and no watched wallets to auto-fill from.
-Provide an address or use `/watch` first.",
+                    description="No address provided and no watched wallets to auto-fill from.\nProvide an address or use `/watch` first.",
                     color=C_RED))
                 return
 
