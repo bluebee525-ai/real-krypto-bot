@@ -1,6 +1,6 @@
 """
 LTC Discord Bot - Auto-detects transactions + /checktx + DM notifications
-Hosted on Railway | Uses BlockCypher API (free, no key needed for basic use)
+Hosted on Railway | Uses Sochain API (100% free, no signup or API key needed)
 """
 
 import discord
@@ -24,7 +24,8 @@ WATCH_ADDRESS    = os.environ.get("LTC_WATCH_ADDRESS", "")  # LTC address to aut
 POLL_INTERVAL    = int(os.environ.get("POLL_INTERVAL", 30)) # seconds between polls
 REQUIRED_CONFS   = int(os.environ.get("REQUIRED_CONFS", 6)) # confirmations for "confirmed"
 
-BLOCKCYPHER_BASE = "https://api.blockcypher.com/v1/ltc/main"
+# Sochain V3 API — completely free, no API key, no signup
+SOCHAIN_BASE = "https://sochain.com/api/v3"
 
 # Colors
 C_LTC     = 0x345D9D
@@ -48,32 +49,64 @@ invoice_counter = 0
 
 
 # ─────────────────────────────────────────────────────────
-# API HELPERS
+# API HELPERS  (Sochain V3 — free, no key needed)
 # ─────────────────────────────────────────────────────────
-async def get_tx(txid: str) -> dict | None:
-    url = f"{BLOCKCYPHER_BASE}/txs/{txid}?limit=50&includeHex=false"
+async def _get(url: str) -> dict | None:
     async with aiohttp.ClientSession() as s:
         async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status == 200:
-                return await r.json()
+                data = await r.json()
+                # Sochain wraps responses in {"data": {...}}
+                return data.get("data", data)
     return None
+
+async def get_tx(txid: str) -> dict | None:
+    """Fetch a transaction and normalise to a common schema."""
+    raw = await _get(f"{SOCHAIN_BASE}/transaction/LTC/{txid}")
+    if not raw:
+        return None
+    # Normalise Sochain fields → our internal schema
+    confs = int(raw.get("confirmations", 0))
+    # total output value
+    total_sats = sum(
+        int(float(o.get("value", 0)) * 1e8)
+        for o in raw.get("outputs", [])
+    )
+    fee_sats = int(float(raw.get("fee", 0)) * 1e8)
+    return {
+        "hash":          raw.get("hash") or raw.get("txid", txid),
+        "confirmations": confs,
+        "total":         total_sats,
+        "fees":          fee_sats,
+        "size":          raw.get("size", 0),
+        "confirmed":     raw.get("time"),
+        "received":      raw.get("time"),
+        "inputs":        [
+            {"addresses": [i.get("address")] if i.get("address") else []}
+            for i in raw.get("inputs", [])
+        ],
+        "outputs":       [
+            {
+                "addresses": [o.get("address")] if o.get("address") else [],
+                "value":     int(float(o.get("value", 0)) * 1e8),
+            }
+            for o in raw.get("outputs", [])
+        ],
+    }
 
 async def get_address_txs(address: str) -> dict | None:
-    url = f"{BLOCKCYPHER_BASE}/addrs/{address}?limit=5&unspentOnly=false"
-    async with aiohttp.ClientSession() as s:
-        async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                return await r.json()
-    return None
+    """Return latest txs for an address. Returns normalised dict with 'txrefs' list."""
+    raw = await _get(f"{SOCHAIN_BASE}/transactions/LTC/{address}/1")
+    if not raw:
+        return None
+    txs = raw.get("transactions", [])
+    return {
+        "txrefs": [{"tx_hash": t.get("hash") or t.get("txid")} for t in txs if t.get("hash") or t.get("txid")]
+    }
 
-async def get_network_height() -> int | None:
-    url = f"{BLOCKCYPHER_BASE}"
-    async with aiohttp.ClientSession() as s:
-        async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                d = await r.json()
-                return d.get("height")
-    return None
+async def get_network_stats() -> dict | None:
+    """Fetch LTC network info from Sochain."""
+    return await _get(f"{SOCHAIN_BASE}/info/LTC")
 
 def satoshi_to_ltc(sats: int) -> float:
     return sats / 1e8
@@ -178,7 +211,7 @@ def build_tx_embed(tx: dict, title: str = "🔍 Transaction Details") -> discord
         text=f"View on Explorer",
         icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png"
     )
-    embed.url = f"https://live.blockcypher.com/ltc/tx/{txid}/"
+    embed.url = f"https://sochain.com/tx/LTC/{txid}"
     return embed
 
 
@@ -210,8 +243,8 @@ def build_confirmed_embed(txid: str, confs: int) -> discord.Embed:
         value=confirmation_bar(confs, REQUIRED_CONFS),
         inline=False
     )
-    embed.url = f"https://live.blockcypher.com/ltc/tx/{txid}/"
-    embed.set_footer(text="Litecoin Bot • Powered by BlockCypher")
+    embed.url = f"https://sochain.com/tx/LTC/{txid}"
+    embed.set_footer(text="Litecoin Bot • Powered by Sochain")
     return embed
 
 
@@ -473,7 +506,7 @@ async def watch(interaction: discord.Interaction, address: str):
     data = await get_address_txs(address)
     last_hash = None
     if data:
-        txrefs = data.get("txrefs", []) + data.get("unconfirmed_txrefs", [])
+        txrefs = data.get("txrefs", [])
         if txrefs:
             last_hash = txrefs[0].get("tx_hash")
 
@@ -493,7 +526,7 @@ async def watch(interaction: discord.Interaction, address: str):
         value=f"• New transaction detected\n• Confirmations: 1 → 3 → {REQUIRED_CONFS}\n• Final confirmation",
         inline=False
     )
-    embed.set_footer(text=f"Polling every {POLL_INTERVAL}s • Powered by BlockCypher")
+    embed.set_footer(text=f"Polling every {POLL_INTERVAL}s • Powered by Sochain")
     await interaction.followup.send(embed=embed)
 
 
@@ -583,7 +616,7 @@ async def invoice(
         data = await get_address_txs(address)
         last_hash = None
         if data:
-            txrefs = data.get("txrefs", []) + data.get("unconfirmed_txrefs", [])
+            txrefs = data.get("txrefs", [])
             if txrefs:
                 last_hash = txrefs[0].get("tx_hash")
         watched_addresses[address] = {
@@ -631,12 +664,10 @@ async def invoicestatus(interaction: discord.Interaction, invoice_id: str):
 @bot.tree.command(name="ltcstats", description="Show Litecoin network stats")
 async def ltcstats(interaction: discord.Interaction):
     await interaction.response.defer()
-    async with aiohttp.ClientSession() as s:
-        async with s.get(BLOCKCYPHER_BASE) as r:
-            if r.status != 200:
-                await interaction.followup.send("❌ Could not fetch network stats.", ephemeral=True)
-                return
-            data = await r.json()
+    data = await get_network_stats()
+    if not data:
+        await interaction.followup.send("❌ Could not fetch network stats.", ephemeral=True)
+        return
 
     embed = discord.Embed(
         title="⛏️ Litecoin Network Stats",
@@ -647,13 +678,13 @@ async def ltcstats(interaction: discord.Interaction):
         name="Litecoin Network",
         icon_url="https://cryptologos.cc/logos/litecoin-ltc-logo.png"
     )
-    embed.add_field(name="📦 Block Height",    value=f"`{data.get('height', 'N/A'):,}`",                 inline=True)
-    embed.add_field(name="⏱️ Peer Count",     value=f"`{data.get('peer_count', 'N/A')}`",               inline=True)
-    embed.add_field(name="🔥 Unconfirmed TXs",value=f"`{data.get('unconfirmed_count', 'N/A'):,}`",      inline=True)
-    embed.add_field(name="⛏️ Hash Rate",       value=f"`{data.get('high_fee_per_kb', 'N/A')} sat/kb`",  inline=True)
-    embed.add_field(name="💸 High Fee/KB",     value=f"`{data.get('high_fee_per_kb', 'N/A')} sat`",     inline=True)
-    embed.add_field(name="💸 Medium Fee/KB",   value=f"`{data.get('medium_fee_per_kb', 'N/A')} sat`",   inline=True)
-    embed.set_footer(text="Data from BlockCypher")
+    embed.add_field(name="📦 Block Height",     value=f"`{data.get('blocks', 'N/A'):,}`",              inline=True)
+    embed.add_field(name="🔗 Network",          value=f"`{data.get('network', 'LTC')}`",               inline=True)
+    embed.add_field(name="⛏️ Difficulty",       value=f"`{float(data.get('difficulty', 0)):,.2f}`",    inline=True)
+    embed.add_field(name="💸 TX Fee (avg)",     value=f"`{data.get('price', 'N/A')} USD/LTC`",         inline=True)
+    embed.add_field(name="🏷️ Hashrate",         value=f"`{data.get('hashrate', 'N/A')}`",              inline=True)
+    embed.add_field(name="⏱️ Unconfirmed TXs", value=f"`{data.get('unconfirmed_txs', 'N/A')}`",       inline=True)
+    embed.set_footer(text="Data from Sochain API • No API key required")
     await interaction.followup.send(embed=embed)
 
 
@@ -700,7 +731,7 @@ async def help_cmd(interaction: discord.Interaction):
         ),
         inline=False
     )
-    embed.set_footer(text="Powered by BlockCypher API • No API key required")
+    embed.set_footer(text="Powered by Sochain API • No API key required")
     await interaction.response.send_message(embed=embed)
 
 
@@ -724,7 +755,7 @@ async def on_ready():
         data = await get_address_txs(WATCH_ADDRESS)
         last_hash = None
         if data:
-            txrefs = data.get("txrefs", []) + data.get("unconfirmed_txrefs", [])
+            txrefs = data.get("txrefs", [])
             if txrefs:
                 last_hash = txrefs[0].get("tx_hash")
         watched_addresses[WATCH_ADDRESS] = {
