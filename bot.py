@@ -303,7 +303,7 @@ async def on_starting(event: hikari.StartingEvent) -> None:
                 type=hikari.OptionType.STRING, name="address",
                 description="Your LTC receiving address", is_required=True))
             .add_option(hikari.CommandOption(
-                type=hikari.OptionType.NUMBER, name="amount",
+                type=hikari.OptionType.FLOAT, name="amount",
                 description="Amount in LTC", is_required=True))
             .add_option(hikari.CommandOption(
                 type=hikari.OptionType.STRING, name="description",
