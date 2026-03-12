@@ -501,6 +501,13 @@ async def on_starting(event: hikari.StartingEvent) -> None:
             .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="user_id",
                 description="Discord user ID (not needed for list)", is_required=False)),
 
+        # ── Fun ───────────────────────────────────────────────
+        bot.rest.slash_command_builder("cryptoroast", "Get an AI roast of any LTC wallet's history 🔥")
+            .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="address",
+                description="LTC address to roast (leave empty for your watched wallet)", is_required=False)),
+
+        bot.rest.slash_command_builder("ltcmood", "What's the vibe of the Litecoin network right now?"),
+
         # ── Info ──────────────────────────────────────────────
         bot.rest.slash_command_builder("fees", "Show current recommended Litecoin network fees"),
         bot.rest.slash_command_builder("ltcstats", "Show live Litecoin network stats"),
@@ -1009,6 +1016,174 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             embed=embed, flags=hikari.MessageFlag.EPHEMERAL)
 
     # ── /fees ─────────────────────────────────────────────────
+    # ── /cryptoroast ──────────────────────────────────────────
+    elif cmd == "cryptoroast":
+        address = str(opt(ix, "address") or "").strip()
+        if not address:
+            if WATCH_ADDRESS:
+                address = WATCH_ADDRESS
+            elif watched_addresses:
+                address = next(iter(watched_addresses))
+        if not address:
+            await ix.create_initial_response(hikari.ResponseType.MESSAGE_CREATE,
+                embed=hikari.Embed(title="❌ No Address",
+                    description="Provide an address or set up a watched wallet first.", color=C_RED),
+                flags=hikari.MessageFlag.EPHEMERAL)
+            return
+        await ix.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
+        stats   = await fetch_address_stats(address)
+        network = await fetch_network()
+        price   = ltc_price_usd
+
+        bal      = stats["balance"]
+        received = stats["received"]
+        spent    = stats["spent"]
+        tx_count = stats["tx_count"]
+        net_ltc  = received - spent
+        usd_val  = bal * price if price else 0
+
+        # Build roast using stats
+        roast_lines = []
+
+        if tx_count == 0:
+            roast_lines.append("🦗 Zero transactions. This wallet is so inactive even tumbleweeds left.")
+        elif tx_count < 5:
+            roast_lines.append(f"📊 Only **{tx_count} transactions**? My grandma moves more crypto and she thinks Bitcoin is a vitamin.")
+        elif tx_count > 500:
+            roast_lines.append(f"🤯 **{tx_count} transactions**?! Bro you need therapy, not a blockchain.")
+        else:
+            roast_lines.append(f"🔢 **{tx_count} transactions** — not embarrassing, not impressive. The participation trophy of crypto.")
+
+        if bal == 0:
+            roast_lines.append("💸 Current balance: **zero**. The blockchain equivalent of checking your wallet and finding a receipt from 2019.")
+        elif bal < 0.01:
+            roast_lines.append(f"🪙 Balance: **{bal:.8f} LTC** (${usd_val:.2f}). You're literally too broke to pay a transaction fee.")
+        elif bal < 1:
+            roast_lines.append(f"💰 **{bal:.4f} LTC** (${usd_val:.2f}). Almost one whole Litecoin. *Almost.*")
+        elif bal < 10:
+            roast_lines.append(f"💰 **{bal:.4f} LTC** (${usd_val:.2f}). A respectable stack! For 2013 maybe.")
+        elif bal < 100:
+            roast_lines.append(f"🤑 **{bal:.2f} LTC** (${usd_val:,.2f}). Okay actually not bad. Don't spend it all at once... or do, apparently that's your thing.")
+        else:
+            roast_lines.append(f"🐳 **{bal:.2f} LTC** (${usd_val:,.2f}). Actual whale detected. Still using a free Discord bot though 💀")
+
+        if received > 0 and spent > 0:
+            ratio = spent / received
+            if ratio > 0.95:
+                roast_lines.append("📤 You've spent **95%+** of everything you ever received. Living on the edge or just bad at saving?")
+            elif ratio < 0.05:
+                roast_lines.append("🔒 You barely spend anything. Diamond hands or just forgot the seed phrase?")
+            else:
+                roast_lines.append(f"⚖️ Sent/received ratio: **{ratio:.0%}**. Balanced — like a crypto therapist would approve.")
+
+        if net_ltc > 0:
+            roast_lines.append(f"📈 Net positive by **{net_ltc:.4f} LTC**. You're accumulating. Slowly. Very slowly.")
+        elif net_ltc < 0:
+            roast_lines.append(f"📉 Net **negative** by {abs(net_ltc):.4f} LTC. The blockchain remembers everything you'd rather forget.")
+
+        # Random closing line
+        import random
+        closers = [
+            "💎 But hey, you're still here — that's more than most crypto projects can say.",
+            "🚀 To the moon! (Terms and conditions apply. Moon not guaranteed.)",
+            "👏 Roast complete. Don't @ me, @ your financial advisor.",
+            "🤝 No wallets were harmed in the making of this roast.",
+            "📱 This has been your daily humiliation, brought to you by NoPulse Bot.",
+        ]
+        roast_lines.append(random.choice(closers))
+
+        embed = (
+            hikari.Embed(title="🔥 Wallet Roast",
+                         description="\n\n".join(roast_lines),
+                         color=C_RED, timestamp=datetime.now(timezone.utc))
+            .set_author(name="CryptoRoast™ by NoPulse", icon=LTC_ICON)
+            .add_field("📬 Victim", f"`{address}`", inline=False)
+            .set_footer(text="Roasts are not financial advice • NoPulse Bot")
+        )
+        await ix.edit_initial_response(embed=embed)
+
+    # ── /ltcmood ──────────────────────────────────────────────
+    elif cmd == "ltcmood":
+        await ix.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
+        network = await fetch_network()
+        price   = await get_ltc_price()
+
+        if not network:
+            await ix.edit_initial_response(embed=hikari.Embed(
+                title="❌ Can't read the vibes", description="Network data unavailable.", color=C_RED))
+            return
+
+        mempool_txs  = network.get("mempool_transactions", 0) or 0
+        txs_24h      = network.get("transactions_24h", 0) or 0
+        volume_24h   = network.get("volume_24h", 0) or 0
+
+        # Score the mood 0-100
+        score = 50  # neutral baseline
+
+        # Mempool activity
+        if mempool_txs > 5000:
+            score += 20
+        elif mempool_txs > 1000:
+            score += 10
+        elif mempool_txs < 100:
+            score -= 15
+
+        # 24h TX volume
+        if txs_24h > 100000:
+            score += 15
+        elif txs_24h > 50000:
+            score += 8
+        elif txs_24h < 10000:
+            score -= 10
+
+        score = max(0, min(100, score))
+
+        # Mood levels
+        if score >= 85:
+            mood       = "🚀 ABSOLUTELY SENDING IT"
+            mood_desc  = "The network is on fire. Something big might be happening. Check Twitter."
+            color      = C_GREEN
+            bar        = "█████████████████████ 🚀"
+        elif score >= 70:
+            mood       = "📈 Bullish & Buzzing"
+            mood_desc  = "Network activity is high, fees moving, people are transacting. Good energy."
+            color      = C_GREEN
+            bar        = "█████████████████░░░░ 📈"
+        elif score >= 55:
+            mood       = "😊 Chill & Healthy"
+            mood_desc  = "Steady activity, normal fees, everything working as it should."
+            color      = C_LTC
+            bar        = "█████████████░░░░░░░░ 😊"
+        elif score >= 40:
+            mood       = "😐 Meh. Just Existing."
+            mood_desc  = "Not dead, not alive. The blockchain equivalent of a Monday morning."
+            color      = C_GREY
+            bar        = "█████████░░░░░░░░░░░░ 😐"
+        elif score >= 25:
+            mood       = "😴 Very Quiet"
+            mood_desc  = "Barely anything happening. Great time to send a TX with low fees though."
+            color      = C_ORANGE
+            bar        = "█████░░░░░░░░░░░░░░░░ 😴"
+        else:
+            mood       = "💀 Ghost Town"
+            mood_desc  = "Is anyone even using this? Fees are basically free. Perfect actually."
+            color      = C_RED
+            bar        = "██░░░░░░░░░░░░░░░░░░░ 💀"
+
+        embed = (
+            hikari.Embed(title=f"🌡️ LTC Network Mood: {mood}",
+                         description=f"*{mood_desc}*",
+                         color=color, timestamp=datetime.now(timezone.utc))
+            .set_author(name="LTC Mood Check", icon=LTC_ICON)
+            .add_field("📊 Vibe Meter",       bar,                                  inline=False)
+            .add_field("⏱️ Mempool TXs",      f"`{mempool_txs:,}`",                 inline=True)
+            .add_field("📈 24h Transactions", f"`{txs_24h:,}`",                     inline=True)
+            .add_field("💵 LTC Price",        f"`${price:,.2f} USD`" if price else "`N/A`", inline=True)
+            .add_field("🎯 Mood Score",       f"`{score}/100`",                     inline=True)
+            .set_footer(text="Vibes measured by very serious algorithms • Blockchair")
+        )
+        await ix.edit_initial_response(embed=embed)
+
     elif cmd == "fees":
         await ix.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
         data = await fetch_network()
@@ -1093,6 +1268,9 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
                 "`/removealert <target>` — Remove a price alert\n"
                 "`/fees` — Current network fee estimates\n"
                 "`/ltcstats` — Live network stats"), inline=False)
+            .add_field("🎉 Fun", (
+                "`/cryptoroast [address]` — AI roast of any wallet 🔥\n"
+                "`/ltcmood` — What\'s the vibe of the network right now?"), inline=False)
             .add_field("⚙️ Settings", (
                 "`/setnotify add <user_id>` — Add user to DM list\n"
                 "`/setnotify remove <user_id>` — Remove user from DM list\n"
