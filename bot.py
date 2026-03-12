@@ -7,7 +7,7 @@ Commands: checktx, watch, unwatch, watchlist, balance, txhistory,
           qr, fees, setnotify, ltcstats, help
 """
 
-import os, io, asyncio, traceback
+import os, io, asyncio, traceback, time
 from datetime import datetime, timezone
 
 import aiohttp
@@ -61,6 +61,8 @@ ltc_price_usd:     float = 0.0
 portfolio:         dict  = {}   # label → address
 price_alerts:      list  = []   # [{target, direction, triggered}]
 notify_user_ids:   list  = list(NOTIFY_USER_IDS)  # mutable at runtime via /setnotify
+balance_24h_high:  dict  = {}   # addr → {high_usd, high_ltc, reset_at}
+last_daily_dm:     float = 0.0  # timestamp of last daily balance DM
 
 # ──────────────────────────────────────────────────────────────
 # API
@@ -281,6 +283,49 @@ async def poll_loop():
         if price:
             ltc_price_usd = price
 
+        # ── Daily balance DM ─────────────────────────────────
+        now = time.time()
+        # Send daily balance summary every 24h
+        if now - last_daily_dm >= 1800:
+            last_daily_dm = now
+            total_ltc = 0.0
+            wallet_lines = []
+            for addr, state in list(watched_addresses.items()):
+                bal   = await fetch_address_balance(addr)
+                label = state.get("label", addr[:16] + "…")
+                usd   = bal * ltc_price_usd if ltc_price_usd else 0
+                total_ltc += bal
+                # 24h high for this address
+                h24 = balance_24h_high.get(addr, {})
+                high_usd = h24.get("high_usd", usd)
+                high_ltc = h24.get("high_ltc", bal)
+                # Reset 24h high if over 24h old
+                if now - h24.get("reset_at", 0) >= 86400:
+                    balance_24h_high[addr] = {"high_usd": usd, "high_ltc": bal, "reset_at": now}
+                    high_usd = usd
+                    high_ltc = bal
+                wallet_lines.append(
+                    f"**{label}**\n"
+                    f"💰 `{bal:.8f} LTC` (${usd:,.2f} USD)\n"
+                    f"🏆 24h High: `{high_ltc:.8f} LTC` (${high_usd:,.2f} USD)"
+                )
+            total_usd = total_ltc * ltc_price_usd if ltc_price_usd else 0
+            if wallet_lines:
+                embed = (
+                    hikari.Embed(title="📊 Wallet Balance Update",
+                                 description="Your 30-minute balance report",
+                                 color=C_PURPLE, timestamp=datetime.now(timezone.utc))
+                    .set_author(name="NoPulse Daily Report", icon=LTC_ICON)
+                    .add_field("💼 Total Balance",
+                               f"**{total_ltc:.8f} LTC**\n**${total_usd:,.2f} USD**", inline=False)
+                )
+                for line in wallet_lines[:10]:
+                    embed.add_field("🏷️ Wallet", line, inline=False)
+                embed.add_field("💵 LTC Rate", f"`${ltc_price_usd:,.2f} USD`", inline=True)
+                embed.set_footer(text="Balance report • Next in 30 minutes")
+                await dm_all(embed)
+                print(f"[30min DM] Sent balance summary to {len(notify_user_ids)} users")
+
         # ── Price alerts ──────────────────────────────────────
         for alert in price_alerts:
             if alert.get("triggered"):
@@ -344,6 +389,15 @@ async def poll_loop():
                 balance = await fetch_address_balance(address)
                 watched_addresses[address]["high_watermark_ltc"] = max(
                     balance, state.get("high_watermark_ltc", 0.0))
+                # Update 24h high
+                now_ts = time.time()
+                h24    = balance_24h_high.get(address, {})
+                usd_now = balance * ltc_price_usd if ltc_price_usd else 0
+                if now_ts - h24.get("reset_at", 0) >= 86400:
+                    balance_24h_high[address] = {"high_usd": usd_now, "high_ltc": balance, "reset_at": now_ts}
+                elif usd_now > h24.get("high_usd", 0):
+                    balance_24h_high[address]["high_usd"] = usd_now
+                    balance_24h_high[address]["high_ltc"] = balance
                 label = state.get("label", address[:20] + "…")
                 embed = tx_embed(tx, "🚨 New Incoming Transaction!")
                 embed.color = C_ORANGE
