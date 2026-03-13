@@ -1,10 +1,5 @@
 """
 LTC Discord Bot  •  Python 3.13  •  hikari
-Commands: checktx, watch, unwatch, watchlist, balance, txhistory,
-          invoice, invoicestatus, invoicelist, expireinvoice,
-          convert, portfolio, addwallet, removewallet,
-          pricealert, pricealerts, removealert,
-          qr, fees, setnotify, ltcstats, help
 """
 
 import os, io, asyncio, traceback, time
@@ -282,7 +277,7 @@ async def notify(embed: hikari.Embed, channel_id: int | None, dm: bool = True):
 # POLLING
 # ──────────────────────────────────────────────────────────────
 async def poll_loop():
-    global ltc_price_usd
+    global ltc_price_usd, last_daily_dm
     while True:
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -572,27 +567,26 @@ async def on_starting(event: hikari.StartingEvent) -> None:
         # ── Info ──────────────────────────────────────────────
         bot.rest.slash_command_builder("fees", "Show current recommended Litecoin network fees"),
         bot.rest.slash_command_builder("ltcstats", "Show live Litecoin network stats"),
+
+        bot.rest.slash_command_builder("test", "🧪 Test all bot features instantly — DMs, balance updates, TX alerts")
+            .add_option(hikari.CommandOption(type=hikari.OptionType.STRING, name="feature",
+                description="Which feature to test", is_required=False,
+                choices=[
+                    hikari.CommandChoice(name="All features",       value="all"),
+                    hikari.CommandChoice(name="DM notification",    value="dm"),
+                    hikari.CommandChoice(name="TX alert",           value="tx"),
+                    hikari.CommandChoice(name="Balance report",     value="balance"),
+                    hikari.CommandChoice(name="Price alert",        value="price"),
+                    hikari.CommandChoice(name="Balance high",       value="high"),
+                    hikari.CommandChoice(name="Confirmation update",value="conf"),
+                ])),
         bot.rest.slash_command_builder("help", "Show all bot commands"),
     ]
 
-    # Set integration types so commands work EVERYWHERE:
-    # guild installs + user installs (DMs, other servers, anywhere)
-    built_commands = []
-    for cmd_builder in commands:
-        try:
-            cmd_builder = (cmd_builder
-                .set_integration_types(
-                    hikari.ApplicationIntegrationType.GUILD_INSTALL,
-                    hikari.ApplicationIntegrationType.USER_INSTALL,
-                )
-                .set_context_types(
-                    hikari.InteractionContextType.GUILD,
-                    hikari.InteractionContextType.BOT_DM,
-                    hikari.InteractionContextType.PRIVATE_CHANNEL,
-                ))
-        except AttributeError:
-            pass  # older hikari version — skip, still works in guilds
-        built_commands.append(cmd_builder)
+    # Register commands — guild install for instant access
+    # For DM/user-app support: set in Discord Developer Portal
+    # Installation tab → User Install + contexts
+    built_commands = commands
 
     if GUILD_ID:
         await bot.rest.set_application_commands(application=app.id, guild=GUILD_ID, commands=[])
@@ -1326,6 +1320,142 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
         await ix.edit_initial_response(embed=embed)
 
     # ── /help ─────────────────────────────────────────────────
+    # ── /test ─────────────────────────────────────────────────
+    elif cmd == "test":
+        # Admin only — check if user has ADMINISTRATOR permission
+        member_perms = ix.member.permissions if ix.member else hikari.Permissions.NONE
+        if not (member_perms & hikari.Permissions.ADMINISTRATOR):
+            await ix.create_initial_response(hikari.ResponseType.MESSAGE_CREATE,
+                embed=hikari.Embed(title="🚫 Admin Only",
+                    description="The `/test` command is restricted to server administrators.",
+                    color=C_RED),
+                flags=hikari.MessageFlag.EPHEMERAL)
+            return
+        feature = str(opt(ix, "feature") or "all")
+        await ix.create_initial_response(hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
+
+        address = WATCH_ADDRESS or (next(iter(watched_addresses)) if watched_addresses else "LTestAddressNotSet")
+        label   = "Test Wallet"
+        results = []
+
+        async def run_test(name: str, coro):
+            try:
+                await coro
+                results.append(f"✅ {name}")
+            except Exception as e:
+                results.append(f"❌ {name}: {e}")
+
+        # ── DM test ───────────────────────────────────────────
+        if feature in ("all", "dm"):
+            embed = hikari.Embed(
+                title="📬 DM Test",
+                description="If you can read this, DMs are working! 🎉",
+                color=C_GREEN, timestamp=datetime.now(timezone.utc))
+            embed.set_author(name="NoPulse Bot Test", icon=LTC_ICON)
+            embed.add_field("✅ Status", "DM delivery confirmed!", inline=True)
+            embed.set_footer(text="Test triggered via /test")
+            await run_test("DM notification", dm_all(embed))
+
+        # ── TX alert test ─────────────────────────────────────
+        if feature in ("all", "tx"):
+            fake_tx = {
+                "hash":          "a" * 64,
+                "confirmations": 0,
+                "total_ltc":     1.23456789,
+                "fee_ltc":       0.00001,
+                "size":          226,
+                "time":          datetime.now(timezone.utc).isoformat(),
+                "inputs":        [{"addresses": ["LSenderAddressExample123456789"]}],
+                "outputs":       [{"addresses": [address], "value_ltc": 1.23456789}],
+            }
+            embed = tx_embed(fake_tx, "🚨 New Incoming Transaction! [TEST]")
+            embed.color = C_ORANGE
+            embed.add_field("📍 Wallet",      f"**{label}**\n`{address}`",  inline=False)
+            embed.add_field("💼 New Balance", fmt_dual(0.4547 + 1.23456789), inline=False)
+            embed.set_footer(text="⚠️ This is a TEST notification | Not a real transaction")
+            await run_test("TX alert", dm_all(embed))
+
+        # ── Balance report test ───────────────────────────────
+        if feature in ("all", "balance"):
+            bal       = await fetch_address_balance(address) if address != "LTestAddressNotSet" else 0.4547
+            total_usd = bal * ltc_price_usd if ltc_price_usd else 0
+            embed = (
+                hikari.Embed(title="📊 Wallet Balance Update [TEST]",
+                             description="Your 30-minute balance report",
+                             color=C_PURPLE, timestamp=datetime.now(timezone.utc))
+                .set_author(name="NoPulse Daily Report", icon=LTC_ICON)
+                .add_field("💼 Total Balance", f"**{bal:.8f} LTC**\n**${total_usd:,.2f} USD**", inline=False)
+                .add_field("🏷️ Wallet",
+                           f"**{label}**\n"
+                           f"💰 `{bal:.8f} LTC` (${total_usd:,.2f} USD)\n"
+                           f"🏆 24h High: `{bal:.8f} LTC` (${total_usd:,.2f} USD)",
+                           inline=False)
+                .add_field("💵 LTC Rate", f"`${ltc_price_usd:,.2f} USD`", inline=True)
+                .set_footer(text="⚠️ TEST report • Balance report • Next in 30 minutes")
+            )
+            await run_test("Balance report", dm_all(embed))
+
+        # ── Price alert test ──────────────────────────────────
+        if feature in ("all", "price"):
+            embed = (
+                hikari.Embed(title="🚨 Price Alert Triggered! [TEST]",
+                             description=f"LTC has reached **${ltc_price_usd:,.2f} USD**!",
+                             color=C_GREEN, timestamp=datetime.now(timezone.utc))
+                .set_author(name="LTC Price Alert", icon=LTC_ICON)
+                .add_field("🎯 Target",  f"${ltc_price_usd:,.2f} USD",     inline=True)
+                .add_field("💵 Current", f"${ltc_price_usd:,.2f} USD",     inline=True)
+                .set_footer(text="⚠️ This is a TEST alert | CoinGecko")
+            )
+            await run_test("Price alert", dm_all(embed))
+
+        # ── Balance high test ─────────────────────────────────
+        if feature in ("all", "high"):
+            bal = await fetch_address_balance(address) if address != "LTestAddressNotSet" else 0.4547
+            usd = bal * ltc_price_usd if ltc_price_usd else 0
+            embed = (
+                hikari.Embed(title="🏆 New Balance High! [TEST]",
+                             description=f"Wallet **{label}** hit a new all-time high balance!",
+                             color=C_GOLD, timestamp=datetime.now(timezone.utc))
+                .set_author(name="LTC Balance Alert", icon=LTC_ICON)
+                .add_field("💰 New High", f"**{bal:.8f} LTC**",          inline=True)
+                .add_field("💵 In USD",   f"**${usd:,.2f} USD**",         inline=True)
+                .add_field("📬 Address",  f"`{address}`",                  inline=False)
+                .set_footer(text="⚠️ This is a TEST notification")
+            )
+            await run_test("Balance high alert", dm_all(embed))
+
+        # ── Confirmation update test ──────────────────────────
+        if feature in ("all", "conf"):
+            fake_tx = {
+                "hash":          "b" * 64,
+                "confirmations": 3,
+                "total_ltc":     0.5,
+                "fee_ltc":       0.00001,
+                "size":          226,
+                "time":          datetime.now(timezone.utc).isoformat(),
+                "inputs":        [{"addresses": ["LSenderAddressExample123456789"]}],
+                "outputs":       [{"addresses": [address], "value_ltc": 0.5}],
+            }
+            embed = tx_embed(fake_tx, "🔄 3 Confirmations [TEST]")
+            embed.set_footer(text="⚠️ This is a TEST confirmation update")
+            await run_test("Confirmation update", dm_all(embed))
+
+        # ── Results summary ───────────────────────────────────
+        all_passed = all(r.startswith("✅") for r in results)
+        summary = hikari.Embed(
+            title="🧪 Test Results",
+            description="\n".join(results),
+            color=C_GREEN if all_passed else C_ORANGE,
+            timestamp=datetime.now(timezone.utc))
+        summary.set_author(name="NoPulse Bot Test Suite", icon=LTC_ICON)
+        if all_passed:
+            summary.add_field("🎉 Status", "All tests passed! Everything is working.", inline=False)
+        else:
+            summary.add_field("⚠️ Status", "Some tests failed — check Railway logs for details.", inline=False)
+        summary.add_field("📬 Notifying", "\n".join(f"<@{uid}>" for uid in notify_user_ids) or "Nobody!", inline=False)
+        summary.set_footer(text="Check your DMs for test notifications")
+        await ix.edit_initial_response(embed=summary)
+
     elif cmd == "help":
         embed = (
             hikari.Embed(title="🪙 LTC Bot — Help",
