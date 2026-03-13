@@ -249,14 +249,21 @@ def invoice_embed(inv: dict) -> hikari.Embed:
 # ──────────────────────────────────────────────────────────────
 async def dm_user(user_id: int, embed: hikari.Embed, attachment: bytes | None = None):
     try:
+        print(f"[DM] Attempting to DM {user_id}...")
         dm = await bot.rest.create_dm_channel(user_id)
+        print(f"[DM] Got DM channel {dm.id} for {user_id}")
         kwargs: dict = {"embed": embed}
         if attachment:
             kwargs["attachment"] = hikari.Bytes(attachment, "qr.png")
         await bot.rest.create_message(dm.id, **kwargs)
-        print(f"[DM] ✅ {user_id}")
+        print(f"[DM] ✅ Successfully sent to {user_id}")
+    except hikari.ForbiddenError:
+        print(f"[DM] ❌ {user_id}: Bot is forbidden — user may have DMs disabled or hasn't shared a server with the bot")
+    except hikari.NotFoundError:
+        print(f"[DM] ❌ {user_id}: User not found — check the ID is correct")
     except Exception as e:
-        print(f"[DM] ❌ {user_id}: {e}")
+        print(f"[DM] ❌ {user_id}: {type(e).__name__}: {e}")
+        traceback.print_exc()
 
 async def dm_all(embed: hikari.Embed, attachment: bytes | None = None):
     for uid in notify_user_ids:
@@ -568,14 +575,33 @@ async def on_starting(event: hikari.StartingEvent) -> None:
         bot.rest.slash_command_builder("help", "Show all bot commands"),
     ]
 
+    # Set integration types so commands work EVERYWHERE:
+    # guild installs + user installs (DMs, other servers, anywhere)
+    built_commands = []
+    for cmd_builder in commands:
+        try:
+            cmd_builder = (cmd_builder
+                .set_integration_types(
+                    hikari.ApplicationIntegrationType.GUILD_INSTALL,
+                    hikari.ApplicationIntegrationType.USER_INSTALL,
+                )
+                .set_context_types(
+                    hikari.InteractionContextType.GUILD,
+                    hikari.InteractionContextType.BOT_DM,
+                    hikari.InteractionContextType.PRIVATE_CHANNEL,
+                ))
+        except AttributeError:
+            pass  # older hikari version — skip, still works in guilds
+        built_commands.append(cmd_builder)
+
     if GUILD_ID:
         await bot.rest.set_application_commands(application=app.id, guild=GUILD_ID, commands=[])
-        await bot.rest.set_application_commands(application=app.id, guild=GUILD_ID, commands=commands)
-        print(f"✅ {len(commands)} commands registered to guild {GUILD_ID} (instant)")
+        await bot.rest.set_application_commands(application=app.id, guild=GUILD_ID, commands=built_commands)
+        print(f"✅ {len(built_commands)} commands registered to guild {GUILD_ID} (instant)")
     else:
         await bot.rest.set_application_commands(application=app.id, commands=[])
-        await bot.rest.set_application_commands(application=app.id, commands=commands)
-        print(f"✅ {len(commands)} commands registered globally")
+        await bot.rest.set_application_commands(application=app.id, commands=built_commands)
+        print(f"✅ {len(built_commands)} commands registered globally")
 
 # ──────────────────────────────────────────────────────────────
 # INTERACTION HANDLER
@@ -586,6 +612,10 @@ def opt(ix: hikari.CommandInteraction, name: str):
             return o.value
     return None
 
+def is_dm_context(ix: hikari.CommandInteraction) -> bool:
+    """Returns True if command was used in DM or user-app context (no guild)."""
+    return ix.guild_id is None
+
 @bot.listen(hikari.InteractionCreateEvent)
 async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
     if not isinstance(event.interaction, hikari.CommandInteraction):
@@ -593,6 +623,10 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
     ix  = event.interaction
     cmd = ix.command_name
     global invoice_seq, ltc_price_usd
+
+    # Handle user-installed app context (DMs, other servers)
+    # channel_id may be None when used outside a guild
+    channel_id = ix.channel_id if ix.channel_id else None
 
     p = await get_ltc_price()
     if p:
@@ -613,7 +647,7 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             return
         embed = tx_embed(tx)
         if tx["confirmations"] < REQUIRED_CONFS:
-            watched_txids[txid] = {"channel_id": ix.channel_id,
+            watched_txids[txid] = {"channel_id": channel_id,
                                    "last_confs": tx["confirmations"], "done": False}
             embed.set_footer(text=f"👁️ Watching — DM'd at 1, 3 & {REQUIRED_CONFS} confs | {price_footer()}")
         await ix.edit_initial_response(embed=embed)
@@ -664,7 +698,7 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
             return
         last    = await fetch_latest_tx_hash(address)
         balance = await fetch_address_balance(address)
-        watched_addresses[address] = {"channel_id": ix.channel_id, "last_tx_hash": last,
+        watched_addresses[address] = {"channel_id": channel_id, "last_tx_hash": last,
                                       "high_watermark_ltc": balance, "label": label}
         portfolio[label] = address
         embed = (
@@ -867,12 +901,12 @@ async def on_interaction(event: hikari.InteractionCreateEvent) -> None:
         invoice_seq += 1
         inv = {"id": f"{invoice_seq:04d}", "address": address, "amount": round(amount_ltc, 8),
                "description": description, "status": "pending", "txid": None,
-               "creator": str(ix.user), "channel_id": ix.channel_id}
+               "creator": str(ix.user), "channel_id": channel_id}
         invoices[inv["id"]] = inv
         if address not in watched_addresses:
             last    = await fetch_latest_tx_hash(address)
             balance = await fetch_address_balance(address)
-            watched_addresses[address] = {"channel_id": ix.channel_id, "last_tx_hash": last,
+            watched_addresses[address] = {"channel_id": channel_id, "last_tx_hash": last,
                                           "high_watermark_ltc": balance, "label": f"Invoice #{inv['id']}"}
         qr_bytes = make_qr(address, amount_ltc)
         await ix.edit_initial_response(embed=invoice_embed(inv),
